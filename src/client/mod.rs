@@ -150,7 +150,7 @@ impl Client {
                     }
                     constants::PACKET_TYPE_MARKER => {
                         let packet = self
-                            .reset()
+                            .reset_after(packet.has_reset_marker())
                             .map_err(|_| self.unrecoverable_error())?;
                         return Ok((packet, false));
                     }
@@ -232,8 +232,18 @@ impl Client {
     /// caller. Note that some databases return multiple reset markers so
     /// these are also accommodated.
     fn reset(&mut self) -> Result<Packet, Error> {
+        self.reset_after(false)
+    }
+
+    /// Like reset(), when the server sent a marker first: if that was its
+    /// reset marker already (as on an interrupt), the next packet that isn't
+    /// a marker is the one to return; waiting for another reset marker would
+    /// never end.
+    fn reset_after(
+        &mut self,
+        mut reset_received: bool,
+    ) -> Result<Packet, Error> {
         self.send_marker(constants::MARKER_TYPE_RESET)?;
-        let mut reset_received = false;
         loop {
             let packet = self.transport.receive_packet()?;
             if packet.has_reset_marker() {

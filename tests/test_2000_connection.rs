@@ -330,3 +330,45 @@ fn test_2010() -> Result<(), oracledb::Error> {
     assert_eq!(proxy, proxy_user.to_uppercase());
     Ok(())
 }
+
+/// Returns the ORA error number of an error, if it is a database error.
+fn ora_code(error: &oracledb::Error) -> Option<usize> {
+    match error.kind() {
+        oracledb::ErrorKind::DbError(db) => Some(db.code()),
+        _ => None,
+    }
+}
+
+#[rstest]
+/// Tests that a call cancelled by the server (ALTER SYSTEM CANCEL SQL from
+/// another session) fails with ORA-01013 and leaves the connection usable.
+fn test_2014(conn: oracledb::Connection) -> Result<(), oracledb::Error> {
+    if conn.version()?.0 < 18 {
+        return Ok(());
+    }
+    let ids = (conn.session_id()?, conn.serial_num()?);
+    let started = Instant::now();
+    let call = std::thread::spawn(move || {
+        let result = conn
+            .query_row(
+                "select count(*) from all_objects a, all_objects b",
+                &[],
+            )
+            .map(|_| ());
+        (result, conn)
+    });
+    std::thread::sleep(Duration::from_millis(1000));
+    let admin =
+        oracledb::connect(oracledb::get_test_config().admin_config.clone())?;
+    admin.execute(
+        &format!("alter system cancel sql '{}, {}'", ids.0, ids.1),
+        &[],
+    )?;
+    let (result, conn) = call.join().unwrap();
+    let error = result.expect_err("the query was cancelled");
+    assert_eq!(ora_code(&error), Some(1013), "{error}");
+    assert!(started.elapsed() < Duration::from_secs(15));
+    let row = conn.query_row("select 2014 from dual", &[])?;
+    assert_eq!(row.get::<i32>(0)?, 2014);
+    Ok(())
+}
