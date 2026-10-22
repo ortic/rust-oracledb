@@ -316,3 +316,31 @@ fn test_3519(conn: oracledb::Connection) -> Result<(), oracledb::Error> {
         &[],
     )
 }
+
+#[rstest]
+/// statements starting with single line comments keep their type
+fn test_3520(conn: oracledb::Connection) -> Result<(), oracledb::Error> {
+    for (sql, is_query, is_dml, is_plsql) in [
+        ("-- c\nselect 1 from dual", true, false, false),
+        ("--c\nselect 1 from dual", true, false, false),
+        ("\n-- c\nselect 1 from dual", true, false, false),
+        ("-- c\n-- d\nselect 1 from dual", true, false, false),
+        (
+            "-- c\nupdate dual set dummy = dummy where 1 = 0",
+            false,
+            true,
+            false,
+        ),
+        ("-- c\nbegin null; end;", false, false, true),
+    ] {
+        let stmt = conn.statement(sql)?.build()?;
+        assert_eq!(
+            (stmt.is_query(), stmt.is_dml(), stmt.is_plsql()),
+            (is_query, is_dml, is_plsql),
+            "{sql:?}"
+        );
+    }
+    let row = conn.query_row("-- c\nselect 3520 from dual", &[])?;
+    assert_eq!(row.get::<i32>(0)?, 3520);
+    Ok(())
+}

@@ -227,7 +227,13 @@ impl SqlParser<'_> {
                 }
             } else if !ch.is_whitespace() {
                 if ch == '-' && last_ch == '-' {
+                    // This consumes the newline as well, so go on with the
+                    // first character of the next line.
                     self.parse_single_line_comment();
+                    last_was_string = false;
+                    last_was_alpha = false;
+                    last_ch = '\n';
+                    continue;
                 } else if ch == '*' && last_ch == '/' {
                     self.parse_multiple_line_comment()?;
                 } else if ch == '"' {
