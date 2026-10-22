@@ -97,7 +97,10 @@ impl ConnectMessage<'_> {
         resp.advance(12)?;
         let flags1: u8 = resp.read_u8()?;
         if flags1 & NSI_NA_REQUIRED != 0 {
-            todo!();
+            return Err(Error::not_implemented(
+                "Native Network Encryption and Data Integrity (use TLS instead)"
+                    .to_string(),
+            ));
         }
         resp.advance(9)?;
         self.sdu = resp.read_u32be()?;
