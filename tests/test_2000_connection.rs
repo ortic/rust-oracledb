@@ -280,3 +280,53 @@ fn test_2009(conn: oracledb::Connection) -> Result<(), oracledb::Error> {
     assert_eq!(row.get::<i32>(0)?, 2009);
     Ok(())
 }
+
+#[test]
+/// Tests proxy authentication with a user of the form
+/// `proxy_user[session_user]`.
+fn test_2010() -> Result<(), oracledb::Error> {
+    let test_config = oracledb::get_test_config();
+    let admin_conn = oracledb::connect(test_config.admin_config.clone())?;
+    let proxy_user = "rsotest_proxy_2010";
+    let proxy_password = "Proxy_2010";
+    let _ = admin_conn.execute(&format!("drop user {proxy_user}"), &[]);
+    admin_conn.execute(
+        &format!(
+            "create user {proxy_user} identified by \"{proxy_password}\""
+        ),
+        &[],
+    )?;
+    admin_conn
+        .execute(&format!("grant create session to {proxy_user}"), &[])?;
+    admin_conn.execute(
+        &format!(
+            "alter user {} grant connect through {proxy_user}",
+            test_config.user
+        ),
+        &[],
+    )?;
+    let result = (|| {
+        let config = oracledb::Config::default()
+            .set_credentials(
+                &format!("{proxy_user}[{}]", test_config.user),
+                proxy_password,
+            )
+            .set_connect_string(&test_config.connect_string)?;
+        let conn = oracledb::connect(config)?;
+        let row = conn.query_row(
+            "select sys_context('userenv', 'session_user'),
+                    sys_context('userenv', 'proxy_user')
+             from dual",
+            &[],
+        )?;
+        Ok::<_, oracledb::Error>((
+            row.get::<String>(0)?,
+            row.get::<String>(1)?,
+        ))
+    })();
+    admin_conn.execute(&format!("drop user {proxy_user}"), &[])?;
+    let (session_user, proxy) = result?;
+    assert_eq!(session_user, test_config.user.to_uppercase());
+    assert_eq!(proxy, proxy_user.to_uppercase());
+    Ok(())
+}

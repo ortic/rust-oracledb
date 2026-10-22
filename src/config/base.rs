@@ -318,6 +318,21 @@ impl Config {
         self.user.as_deref()
     }
 
+    /// Returns the user that authenticates and, for proxy authentication
+    /// (a user of the form `proxy_user[session_user]`), the session user that
+    /// is sent as the proxy client name.
+    pub(crate) fn auth_users(&self) -> (Option<&str>, Option<&str>) {
+        let Some(user) = self.user.as_deref() else {
+            return (None, None);
+        };
+        match user.find('[') {
+            Some(start) if start > 0 && user.ends_with(']') => {
+                (Some(&user[..start]), Some(&user[start + 1..user.len() - 1]))
+            }
+            _ => (Some(user), None),
+        }
+    }
+
     /// Returns the wallet location associated with the configuration.
     pub fn wallet_location(&self) -> Option<&str> {
         self.wallet_location.as_deref()

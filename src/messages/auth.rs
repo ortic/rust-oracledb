@@ -108,6 +108,14 @@ impl AuthMessage {
         self.add_pair(key, &str_value, flags);
     }
 
+    /// Adds the session user as the proxy client name when connecting through
+    /// a proxy user (a user of the form `proxy_user[session_user]`).
+    fn add_proxy_client_name(&mut self, client: &Client) {
+        if let (_, Some(session_user)) = client.config().auth_users() {
+            self.add_pair("PROXY_CLIENT_NAME", session_user, 0);
+        }
+    }
+
     /// Encrypts a password and adds a key/value pair containing the encrypted
     /// password.
     fn encrypt_password(
@@ -493,8 +501,10 @@ impl Message for AuthMessage {
             self.add_pair("AUTH_SID", client.config().osuser(), 0);
             self.resend_needed = true;
         } else if let Some(combo_key) = self.combo_key {
+            self.add_proxy_client_name(client);
             self.encrypt_passwords(client, &combo_key);
         } else {
+            self.add_proxy_client_name(client);
             self.generate_verifier(client);
             self.add_pair(
                 "SESSION_CLIENT_CHARSET",
@@ -536,7 +546,7 @@ impl Message for AuthMessage {
 
     fn serialize(&self, client: &Client, buf: &mut WriteBuffer) {
         buf.write_function_header(client, self.get_ttc_message_type());
-        let user_bytes = client.config().user().unwrap().as_bytes();
+        let user_bytes = client.config().auth_users().0.unwrap().as_bytes();
         buf.write_u8(1); // pointer (user)
         buf.write_ub4(user_bytes.len().try_into().unwrap());
         buf.write_ub4(self.get_auth_mode(client));
