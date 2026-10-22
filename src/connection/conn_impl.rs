@@ -56,6 +56,7 @@ use crate::statement::StatementBuilder;
 
 pub(crate) struct ConnImpl {
     client_ref: ClientRef,
+    breaker: crate::client::BreakerRef,
     db_info: DbInfo,
     returned_to_pool: Instant,
 }
@@ -67,6 +68,11 @@ pub(crate) enum ConnImplStatus {
 }
 
 impl ConnImpl {
+    /// Interrupts the round trip in progress on another thread, if any.
+    pub(crate) fn cancel(&self) -> Result<(), Error> {
+        self.breaker.send_break()
+    }
+
     /// Changes the password of the logged on user.
     pub(crate) fn change_password(
         &self,
@@ -98,9 +104,11 @@ impl ConnImpl {
         config.validate()?;
         let mut client = Client::new(config, pool_id);
         let db_info = client.connect()?;
+        let breaker = client.breaker();
         let client_ref = std::sync::Arc::new(std::sync::Mutex::new(client));
         Ok(ConnImpl {
             client_ref,
+            breaker,
             db_info,
             returned_to_pool: Instant::now(),
         })

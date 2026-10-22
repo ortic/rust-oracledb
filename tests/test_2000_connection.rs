@@ -340,6 +340,86 @@ fn ora_code(error: &oracledb::Error) -> Option<usize> {
 }
 
 #[rstest]
+/// Tests cancelling a running query from another thread: it fails with
+/// ORA-01013 and the connection stays usable.
+fn test_2011(conn: oracledb::Connection) -> Result<(), oracledb::Error> {
+    let conn = std::sync::Arc::new(conn);
+    let worker = conn.clone();
+    let started = Instant::now();
+    let call = std::thread::spawn(move || {
+        worker
+            .query_row(
+                "select count(*) from all_objects a, all_objects b",
+                &[],
+            )
+            .map(|_| ())
+    });
+    std::thread::sleep(Duration::from_millis(1000));
+    conn.cancel()?;
+    let error = call.join().unwrap().expect_err("the query was cancelled");
+    assert_eq!(ora_code(&error), Some(1013), "{error}");
+    assert!(started.elapsed() < Duration::from_secs(15));
+    let row = conn.query_row("select 2011 from dual", &[])?;
+    assert_eq!(row.get::<i32>(0)?, 2011);
+    Ok(())
+}
+
+#[rstest]
+/// Tests that cancelling an idle connection does nothing.
+fn test_2012(conn: oracledb::Connection) -> Result<(), oracledb::Error> {
+    conn.cancel()?;
+    conn.cancel()?;
+    let row = conn.query_row("select 2012 from dual", &[])?;
+    assert_eq!(row.get::<i32>(0)?, 2012);
+    Ok(())
+}
+
+#[rstest]
+/// Tests that cancels racing with short calls leave the connection in sync:
+/// every call returns its own result or ORA-01013.
+fn test_2013(conn: oracledb::Connection) -> Result<(), oracledb::Error> {
+    let conn = std::sync::Arc::new(conn);
+    let done = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+    let canceller = {
+        let conn = conn.clone();
+        let done = done.clone();
+        std::thread::spawn(move || {
+            let mut n = 0u64;
+            while !done.load(std::sync::atomic::Ordering::Relaxed) {
+                let _ = conn.cancel();
+                n += 1;
+                // 1 to 9 ms: some calls finish, some are cancelled, and some
+                // cancels come just too late.
+                std::thread::sleep(Duration::from_micros(
+                    1000 + (n % 9) * 1000,
+                ));
+            }
+        })
+    };
+    let mut cancelled = 0;
+    for i in 0..300i32 {
+        // A few milliseconds each, so cancels land in and right after calls.
+        match conn.query_row(
+            "select count(*) + :1 from dual connect by level <= 20000",
+            &[&i],
+        ) {
+            Ok(row) => assert_eq!(row.get::<i32>(0)?, i + 20000),
+            Err(e) if ora_code(&e) == Some(1013) => cancelled += 1,
+            Err(e) => panic!("call {i}: {e}"),
+        }
+    }
+    done.store(true, std::sync::atomic::Ordering::Relaxed);
+    canceller.join().unwrap();
+    for i in 0..5i32 {
+        let row = conn.query_row("select :1 * 2 from dual", &[&i])?;
+        assert_eq!(row.get::<i32>(0)?, i * 2);
+    }
+    eprintln!("{cancelled} of 300 calls were cancelled");
+    assert!(cancelled > 0 && cancelled < 300, "{cancelled} cancelled");
+    Ok(())
+}
+
+#[rstest]
 /// Tests that a call cancelled by the server (ALTER SYSTEM CANCEL SQL from
 /// another session) fails with ORA-01013 and leaves the connection usable.
 fn test_2014(conn: oracledb::Connection) -> Result<(), oracledb::Error> {

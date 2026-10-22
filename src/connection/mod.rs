@@ -126,6 +126,18 @@ impl Connection {
         self.get_impl()?.clear_end_user_security_context()
     }
 
+    /// Interrupts the call this connection is making on another thread, as
+    /// OCI's break does: the call fails with ORA-01013 and the connection
+    /// stays usable. Does nothing if no call is in progress. Not supported
+    /// on TLS connections yet.
+    ///
+    /// Like any interrupt, it's only noticed once the server checks for it:
+    /// a running query stops quickly, a call such as DBMS_SESSION.SLEEP only
+    /// when it returns.
+    pub fn cancel(&self) -> Result<(), Error> {
+        self.get_impl()?.cancel()
+    }
+
     /// Commits any pending transactions.
     pub fn commit(&self) -> Result<(), Error> {
         self.get_impl()?.commit()

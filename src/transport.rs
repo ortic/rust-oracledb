@@ -478,6 +478,20 @@ impl Transport {
 
     /// Indicates that the full packet size should be used for all subsequent
     /// packets sent on the transport.
+    /// A second handle to the TCP socket, for writing interrupts from
+    /// another thread; None for TLS (and when not connected).
+    pub(crate) fn clone_tcp_socket(&self) -> Option<std::net::TcpStream> {
+        match &self.low_level_transport {
+            Some(LowLevelTransport::Tcp(stream)) => stream.try_clone().ok(),
+            _ => None,
+        }
+    }
+
+    /// Returns whether packet sizes take four bytes.
+    pub(crate) fn full_packet_size(&self) -> bool {
+        self.full_packet_size
+    }
+
     pub(crate) fn set_full_packet_size(&mut self) {
         self.full_packet_size = true;
     }

@@ -29,6 +29,7 @@
 // from the server.
 //-----------------------------------------------------------------------------
 
+mod breaker;
 mod capabilities;
 
 use std::mem;
@@ -57,6 +58,7 @@ use crate::messages::FlushOutBindsMessage;
 use crate::messages::LogoffMessage;
 use crate::messages::MarkerMessage;
 use crate::messages::Message;
+use crate::messages::PingMessage;
 use crate::messages::ProtocolMessage;
 use crate::messages::RollbackMessage;
 use crate::packet::Packet;
@@ -69,6 +71,7 @@ use crate::statement::StatementOptions;
 use crate::transport::Transport;
 use crate::write_buffer::WriteBuffer;
 
+pub(crate) use breaker::BreakerRef;
 use capabilities::Capabilities;
 
 const TTC_SECURITY_CONTEXT_ATTACH_FLAG: u32 = 0x01;
@@ -76,6 +79,8 @@ const TTC_END_USER_SECURITY_CONTEXT_KEY: &str = "ORCL_XS_AUTHZ_CONTEXT";
 
 pub struct Client {
     transport: Transport,
+    /// Lets Connection::cancel() interrupt a round trip in progress.
+    breaker: BreakerRef,
     caps: capabilities::Capabilities,
     config: Config,
     combo_key: Option<[u8; 32]>,
@@ -112,8 +117,13 @@ impl Client {
     ) -> Result<Response, Error> {
         message.pre_process(self);
         self.send_message(message)?;
+        self.breaker.begin_round_trip();
         let mut response = Response::new();
-        if let Err(e) = self.receive_response(message, &mut response) {
+        let result = self.receive_response(message, &mut response);
+        if self.breaker.end_round_trip() {
+            self.absorb_late_break();
+        }
+        if let Err(e) = result {
             response.cleanup_pending_values(self);
             Err(e)
         } else {
@@ -215,6 +225,18 @@ impl Client {
         Ok(())
     }
 
+    /// Returns the breaker, which interrupts round trips from other threads.
+    pub(crate) fn breaker(&self) -> BreakerRef {
+        self.breaker.clone()
+    }
+
+    /// Takes the interrupt that came too late to stop the last round trip
+    /// (Connection::cancel() just as it finished) with a ping, which then
+    /// fails with ORA-01013 instead of the next real call.
+    fn absorb_late_break(&mut self) {
+        let _ = self.process_message(&mut PingMessage::new());
+    }
+
     /// Called when a timeout occurs and attempts to recover from it by sending
     /// an interrupt to the server and waiting for its response. If any error
     /// occurs during the recovery process, the connection is deemed unusable
@@ -249,6 +271,7 @@ impl Client {
             if packet.has_reset_marker() {
                 reset_received = true;
             } else if reset_received {
+                self.breaker.break_answered();
                 return Ok(packet);
             }
         }
@@ -268,6 +291,8 @@ impl Client {
         let mut buf = WriteBuffer::new();
         self.write_piggybacks(&mut buf);
         message.serialize(self, &mut buf);
+        let breaker = self.breaker.clone();
+        let _writing = breaker.writing()?;
         self.transport.send_packets(
             message.get_packet_type(),
             message.get_packet_flags(),
@@ -291,6 +316,7 @@ impl Client {
     /// is no longer deemed usable. The connection is closed and an error is
     /// returned.
     fn unrecoverable_error(&mut self) -> Error {
+        self.breaker.set_socket(None, false);
         let _ = self.transport.close();
         Error::unable_to_recover()
     }
@@ -596,6 +622,7 @@ impl Client {
         self.end_request()?;
         self.process_message(&mut LogoffMessage::new())?;
         self.send_message(&mut EofMessage::new())?;
+        self.breaker.set_socket(None, false);
         self.transport.close()
     }
 
@@ -894,6 +921,7 @@ impl Client {
         let cache_size = config.stmtcachesize();
         Self {
             transport: Transport::new(),
+            breaker: BreakerRef::default(),
             caps: Capabilities::new(),
             config,
             combo_key: None,
@@ -941,6 +969,10 @@ impl Client {
                 constants::TTC_SESSION_STATE_REQUEST_BEGIN;
             self.in_request = true;
         }
+        self.breaker.set_socket(
+            self.transport.clone_tcp_socket(),
+            self.transport.full_packet_size(),
+        );
         Ok(db_info)
     }
 
