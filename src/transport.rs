@@ -38,7 +38,6 @@ use std::os::windows::io::AsRawSocket;
 use pkcs8::DecodePrivateKey;
 use rustls::ClientConfig as TlsClientConfig;
 use rustls::ClientConnection as TlsClientConnection;
-use rustls::StreamOwned as TlsStream;
 use rustls::pki_types::CertificateDer;
 use rustls::pki_types::PrivateKeyDer;
 use rustls::pki_types::pem::PemObject;
@@ -47,10 +46,10 @@ use rustls::sign::CertifiedKey;
 use std::cmp::min;
 use std::env;
 use std::fs;
-use std::io::{Read, Write};
+use std::io::{self, Read, Write};
 use std::net::TcpStream;
 use std::path::Path;
-use std::sync::Arc;
+use std::sync::{Arc, Mutex, MutexGuard};
 
 use crate::config::Address;
 use crate::config::Config;
@@ -60,7 +59,141 @@ use crate::packet::Packet;
 
 enum LowLevelTransport {
     Tcp(TcpStream),
-    Tls(Box<TlsStream<TlsClientConnection, TcpStream>>),
+    Tls(TlsTransport),
+}
+
+/// A TLS session that another thread can write to (an interrupt from
+/// Connection::cancel()) while this one waits for data: reading waits on the
+/// socket without holding the session.
+struct TlsTransport {
+    session: Arc<Mutex<TlsClientConnection>>,
+    sock: TcpStream,
+    /// Bytes read from the socket that the session couldn't take yet.
+    pending: Vec<u8>,
+}
+
+/// Writes interrupts to the database from another thread
+/// (Connection::cancel()).
+pub(crate) enum InterruptWriter {
+    Tcp(TcpStream),
+    Tls(Arc<Mutex<TlsClientConnection>>, TcpStream),
+}
+
+impl InterruptWriter {
+    /// Writes the data and sends it.
+    pub(crate) fn write_all(&mut self, data: &[u8]) -> io::Result<()> {
+        match self {
+            Self::Tcp(sock) => {
+                sock.write_all(data)?;
+                sock.flush()
+            }
+            Self::Tls(session, sock) => {
+                let mut session = lock_session(session)?;
+                session.writer().write_all(data)?;
+                send_tls(&mut session, sock)
+            }
+        }
+    }
+}
+
+fn lock_session(
+    session: &Mutex<TlsClientConnection>,
+) -> io::Result<MutexGuard<'_, TlsClientConnection>> {
+    session
+        .lock()
+        .map_err(|_| io::Error::other("TLS session lock poisoned"))
+}
+
+/// Sends what the session has to send: data written to it, alerts, key
+/// updates.
+fn send_tls(
+    session: &mut TlsClientConnection,
+    mut sock: &TcpStream,
+) -> io::Result<()> {
+    while session.wants_write() {
+        session.write_tls(&mut sock)?;
+    }
+    Ok(())
+}
+
+impl TlsTransport {
+    /// Performs the handshake on the socket.
+    fn new(
+        mut session: TlsClientConnection,
+        mut sock: TcpStream,
+    ) -> io::Result<Self> {
+        while session.is_handshaking() {
+            session.complete_io(&mut sock)?;
+        }
+        Ok(Self {
+            session: Arc::new(Mutex::new(session)),
+            sock,
+            pending: Vec::new(),
+        })
+    }
+
+    fn flush(&mut self) -> io::Result<()> {
+        send_tls(&mut *lock_session(&self.session)?, &self.sock)?;
+        (&self.sock).flush()
+    }
+
+    fn interrupt_writer(&self) -> io::Result<InterruptWriter> {
+        Ok(InterruptWriter::Tls(
+            self.session.clone(),
+            self.sock.try_clone()?,
+        ))
+    }
+
+    fn read(&mut self, buf: &mut [u8]) -> io::Result<usize> {
+        let mut raw = vec![0; 18 * 1024];
+        loop {
+            {
+                let mut session = lock_session(&self.session)?;
+                while !self.pending.is_empty() {
+                    let mut rd: &[u8] = &self.pending;
+                    match session.read_tls(&mut rd) {
+                        // A close_notify came: nothing more is taken.
+                        Ok(0) => break,
+                        Ok(n) => {
+                            self.pending.drain(..n);
+                            if let Err(e) = session.process_new_packets() {
+                                // Send the alert about it, as rustls asks.
+                                let _ = send_tls(&mut session, &self.sock);
+                                return Err(io::Error::other(e));
+                            }
+                        }
+                        // The plaintext buffer is full: read from it first.
+                        Err(e) if e.kind() == io::ErrorKind::Other => break,
+                        Err(e) => return Err(e),
+                    }
+                }
+                send_tls(&mut session, &self.sock)?;
+                match session.reader().read(buf) {
+                    Err(e) if e.kind() == io::ErrorKind::WouldBlock => {}
+                    result => return result,
+                }
+            }
+            let n = (&self.sock).read(&mut raw)?;
+            if n == 0 {
+                return Ok(0);
+            }
+            self.pending.extend_from_slice(&raw[..n]);
+        }
+    }
+
+    fn shutdown(&mut self) {
+        if let Ok(mut session) = lock_session(&self.session) {
+            session.send_close_notify();
+            let _ = send_tls(&mut session, &self.sock);
+        }
+        let _ = self.sock.shutdown(std::net::Shutdown::Both);
+    }
+
+    fn write_all(&mut self, data: &[u8]) -> io::Result<()> {
+        let mut session = lock_session(&self.session)?;
+        session.writer().write_all(data)?;
+        send_tls(&mut session, &self.sock)
+    }
 }
 
 impl LowLevelTransport {
@@ -104,13 +237,9 @@ impl LowLevelTransport {
         )?;
         let stream = match self {
             Self::Tcp(stream) => stream,
-            Self::Tls(orig_stream) => {
-                let (_, stream) = orig_stream.into_parts();
-                stream
-            }
+            Self::Tls(orig) => orig.sock,
         };
-        let tls_stream = rustls::StreamOwned::new(conn, stream);
-        Ok(Self::Tls(Box::new(tls_stream)))
+        Ok(Self::Tls(TlsTransport::new(conn, stream)?))
     }
 
     /// Reads bytes from the low level transport and returns the number of
@@ -136,15 +265,12 @@ impl LowLevelTransport {
 
     /// Shuts down the low-level transport.
     fn shutdown(&mut self) -> Result<(), Error> {
-        let stream = match self {
-            Self::Tcp(s) => s,
-            Self::Tls(s) => {
-                s.conn.send_close_notify();
-                s.flush()?;
-                &mut s.sock
+        match self {
+            Self::Tcp(s) => {
+                let _ = s.shutdown(std::net::Shutdown::Both);
             }
-        };
-        let _ = stream.shutdown(std::net::Shutdown::Both);
+            Self::Tls(s) => s.shutdown(),
+        }
         Ok(())
     }
 
@@ -476,14 +602,15 @@ impl Transport {
             .and_then(|t| t.set_read_timeout(duration))
     }
 
-    /// Indicates that the full packet size should be used for all subsequent
-    /// packets sent on the transport.
-    /// A second handle to the TCP socket, for writing interrupts from
-    /// another thread; None for TLS (and when not connected).
-    pub(crate) fn clone_tcp_socket(&self) -> Option<std::net::TcpStream> {
+    /// Returns a writer for interrupts from another thread; None when not
+    /// connected.
+    pub(crate) fn interrupt_writer(&self) -> Option<InterruptWriter> {
         match &self.low_level_transport {
-            Some(LowLevelTransport::Tcp(stream)) => stream.try_clone().ok(),
-            _ => None,
+            Some(LowLevelTransport::Tcp(stream)) => {
+                stream.try_clone().ok().map(InterruptWriter::Tcp)
+            }
+            Some(LowLevelTransport::Tls(tls)) => tls.interrupt_writer().ok(),
+            None => None,
         }
     }
 
@@ -492,6 +619,8 @@ impl Transport {
         self.full_packet_size
     }
 
+    /// Indicates that the full packet size should be used for all subsequent
+    /// packets sent on the transport.
     pub(crate) fn set_full_packet_size(&mut self) {
         self.full_packet_size = true;
     }

@@ -29,18 +29,17 @@
 // (Connection::cancel()), while the calling thread holds the client.
 //-----------------------------------------------------------------------------
 
-use std::io::Write;
-use std::net::TcpStream;
 use std::sync::{Arc, Mutex, MutexGuard};
 
 use crate::constants;
 use crate::error::Error;
+use crate::transport::InterruptWriter;
 
 #[derive(Default)]
 pub(crate) struct BreakState {
-    /// A second handle to the connection's socket, used to write the
-    /// interrupt; None for TLS, where writes must go through the session.
-    socket: Option<TcpStream>,
+    /// Writes the interrupt: a second handle to the connection's socket, or
+    /// for TLS that and the session.
+    socket: Option<InterruptWriter>,
     /// Whether packet sizes take four bytes (negotiated at connect).
     full_packet_size: bool,
     /// A request was sent and its response hasn't been received yet.
@@ -69,7 +68,7 @@ impl Breaker {
     /// when the connection closes).
     pub(crate) fn set_socket(
         &self,
-        socket: Option<TcpStream>,
+        socket: Option<InterruptWriter>,
         full_packet_size: bool,
     ) {
         if let Ok(mut state) = self.state.lock() {
@@ -114,16 +113,14 @@ impl Breaker {
             return Ok(());
         }
         let full_packet_size = state.full_packet_size;
+        // Not connected (any more): nothing to interrupt.
         let Some(socket) = state.socket.as_mut() else {
-            return Err(Error::not_implemented(
-                "cancelling a call on a TLS connection".to_string(),
-            ));
+            return Ok(());
         };
         socket.write_all(&marker_packet(
             constants::MARKER_TYPE_INTERRUPT,
             full_packet_size,
         ))?;
-        socket.flush()?;
         state.break_sent = true;
         Ok(())
     }
@@ -164,12 +161,11 @@ mod tests {
     #[test]
     fn breaks_only_during_round_trips() {
         let breaker = Breaker::default();
-        // Idle: nothing to interrupt, not even without a socket.
+        // Idle: nothing to interrupt.
         assert!(breaker.send_break().is_ok());
         breaker.begin_round_trip();
-        // No socket (TLS): says so.
-        assert!(breaker.send_break().is_err());
-        assert!(!breaker.end_round_trip());
+        // Not connected: nothing to write to, and nothing was sent.
         assert!(breaker.send_break().is_ok());
+        assert!(!breaker.end_round_trip());
     }
 }

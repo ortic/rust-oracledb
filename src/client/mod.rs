@@ -970,7 +970,7 @@ impl Client {
             self.in_request = true;
         }
         self.breaker.set_socket(
-            self.transport.clone_tcp_socket(),
+            self.transport.interrupt_writer(),
             self.transport.full_packet_size(),
         );
         Ok(db_info)
