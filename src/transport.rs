@@ -219,10 +219,11 @@ impl LowLevelTransport {
     fn negotiate_tls(
         self,
         server_name: &str,
+        wallet_location: Option<&str>,
         config: &Config,
     ) -> Result<Self, Error> {
         let mut resolver = CustomClientCertResolver::new();
-        if let Some(wallet_location) = config.wallet_location() {
+        if let Some(wallet_location) = wallet_location {
             resolver.populate(
                 wallet_location,
                 config.get_wallet_password_bytes(),
@@ -453,11 +454,13 @@ impl Transport {
             .and_then(|mut t| t.shutdown())
     }
 
-    /// Establishes a TCP connection to the database.
+    /// Establishes a TCP connection to the database. The wallet is the
+    /// connect string's or else the configuration's.
     pub(crate) fn connect(
         &mut self,
         stream: TcpStream,
         address: &Address,
+        wallet_location: Option<&str>,
         config: &Config,
     ) -> Result<(), Error> {
         stream.set_nodelay(true)?;
@@ -465,7 +468,7 @@ impl Transport {
         self.socket_num = get_socket_num(&stream);
         self.low_level_transport = Some(LowLevelTransport::Tcp(stream));
         if address.protocol() == "tcps" {
-            self.negotiate_tls(address.host(), config)?;
+            self.negotiate_tls(address.host(), wallet_location, config)?;
         }
         Ok(())
     }
@@ -484,6 +487,7 @@ impl Transport {
     pub(crate) fn negotiate_tls(
         &mut self,
         server_name: &str,
+        wallet_location: Option<&str>,
         config: &Config,
     ) -> Result<(), Error> {
         if self.print_packets {
@@ -492,8 +496,11 @@ impl Transport {
             println!("{}\n", header);
         }
         let low_level_transport = self.low_level_transport.take().unwrap();
-        self.low_level_transport =
-            Some(low_level_transport.negotiate_tls(server_name, config)?);
+        self.low_level_transport = Some(low_level_transport.negotiate_tls(
+            server_name,
+            wallet_location,
+            config,
+        )?);
         Ok(())
     }
 

@@ -672,7 +672,17 @@ impl Client {
             } else {
                 TcpStream::connect(sock_addr)?
             };
-        self.transport.connect(stream, address, &self.config)?;
+        // A wallet in the connect string wins over the configuration's.
+        let wallet_location = description
+            .wallet_location()
+            .or(self.config.wallet_location())
+            .map(str::to_owned);
+        self.transport.connect(
+            stream,
+            address,
+            wallet_location.as_deref(),
+            &self.config,
+        )?;
         self.transport
             .set_max_packet_size(description.sdu() as usize);
         let mut address = address.clone();
@@ -696,6 +706,7 @@ impl Client {
                     self.transport.connect(
                         new_stream,
                         &address,
+                        wallet_location.as_deref(),
                         &self.config,
                     )?;
                     connect_message = ConnectMessage::new(
@@ -710,7 +721,11 @@ impl Client {
                 }
             }
             if connect_message.tls_renegotiation_needed {
-                self.transport.negotiate_tls(address.host(), &self.config)?;
+                self.transport.negotiate_tls(
+                    address.host(),
+                    wallet_location.as_deref(),
+                    &self.config,
+                )?;
             }
         }
         self.caps.adjust_for_protocol(

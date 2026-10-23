@@ -451,3 +451,41 @@ fn test_2014(conn: oracledb::Connection) -> Result<(), oracledb::Error> {
     assert_eq!(row.get::<i32>(0)?, 2014);
     Ok(())
 }
+
+#[test]
+/// Tests that a wallet location in the connect string is used for TLS, as an
+/// easy connect parameter and in a full descriptor (under both names), when
+/// the configuration has none (needs a tcps:// test connect string and
+/// RSO_TEST_WALLET_LOCATION).
+fn test_2015() -> Result<(), oracledb::Error> {
+    let test_config = oracledb::get_test_config();
+    let (Some(wallet), Some(rest)) = (
+        test_config.config.wallet_location(),
+        test_config.connect_string.strip_prefix("tcps://"),
+    ) else {
+        common::skip_test("requires TLS and RSO_TEST_WALLET_LOCATION");
+        return Ok(());
+    };
+    let (host_port, service) = rest.split_once('/').unwrap();
+    let (host, port) = host_port.split_once(':').unwrap();
+    let descriptor = |key: &str| {
+        format!(
+            "(DESCRIPTION=(ADDRESS=(PROTOCOL=TCPS)(HOST={host})(PORT={port}))\
+             (CONNECT_DATA=(SERVICE_NAME={service}))\
+             (SECURITY=({key}={wallet})))"
+        )
+    };
+    for connect_string in [
+        format!("{}?wallet_location={wallet}", test_config.connect_string),
+        descriptor("WALLET_LOCATION"),
+        descriptor("MY_WALLET_DIRECTORY"),
+    ] {
+        let config = oracledb::Config::default()
+            .set_credentials(&test_config.user, &test_config.password)
+            .set_connect_string(&connect_string)?;
+        let conn = oracledb::connect(config)?;
+        let row = conn.query_row("select 2015 from dual", &[])?;
+        assert_eq!(row.get::<i32>(0)?, 2015, "{connect_string}");
+    }
+    Ok(())
+}

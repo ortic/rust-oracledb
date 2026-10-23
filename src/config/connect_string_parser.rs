@@ -250,6 +250,43 @@ fn parse_easy_connect_service_name(parser: &mut Parser) -> Option<String> {
     parser.parse_token_with_sep(is_network_keyword_char, '/')
 }
 
+/// Parses the parameters at the end of an easy connect string
+/// (`?wallet_location=/dir&ssl_server_dn_match=no`) and applies each as if it
+/// were in its section of a full descriptor. Returns None if they are
+/// malformed.
+fn parse_easy_connect_parameters(
+    parser: &mut Parser,
+    description: &mut Description,
+) -> Option<()> {
+    if !parser.peek_char_matches('?') {
+        return Some(());
+    }
+    parser.next_char();
+    loop {
+        let key = parser.parse_token(is_network_keyword_char)?;
+        if !parser.next_char_matches('=') {
+            return None;
+        }
+        let mut value = String::new();
+        while let Some(ch) = parser.peek_char()
+            && ch != '&'
+        {
+            value.push(ch);
+            parser.next_char();
+        }
+        parser.save_pos();
+        let node = Node {
+            key: key.to_lowercase(),
+            value: NodeValue::Simple(value.trim().to_string()),
+        };
+        description.process_easy_connect_parameter(&node).ok()?;
+        if !parser.peek_char_matches('&') {
+            return Some(());
+        }
+        parser.next_char();
+    }
+}
+
 /// Attempts to parse an easy connect string from the connect string. This
 /// is allowed to return None instead of an error, which will cause the
 /// connect string to be treated as a tnsnames.ora file entry instead.
@@ -312,7 +349,19 @@ pub(crate) fn parse_connect_string(
         description_list.validate(parser.source())?;
         Ok(Some(description_list))
     } else {
-        let result = parse_easy_connect_string(&mut parser);
+        let mut result = parse_easy_connect_string(&mut parser);
+        if let Some(description_list) = result.as_mut()
+            && parse_easy_connect_parameters(
+                &mut parser,
+                &mut description_list.descriptions[0],
+            )
+            .is_none()
+        {
+            return Err(Error::invalid_connect_string(
+                connect_string,
+                "invalid easy connect parameters",
+            ));
+        }
         if result.is_none() && !allow_none_return {
             Err(Error::invalid_connect_string(
                 connect_string,

@@ -457,6 +457,24 @@ impl Description {
         Ok(())
     }
 
+    /// Processes a parameter of an easy connect string, which may belong to
+    /// the DESCRIPTION, CONNECT_DATA or SECURITY section of a full
+    /// descriptor; the sections ignore keys that aren't theirs.
+    pub(crate) fn process_easy_connect_parameter(
+        &mut self,
+        node: &Node,
+    ) -> Result<(), Error> {
+        match node.key() {
+            // Containers only exist in full descriptors.
+            "address" | "address_list" | "connect_data" | "security" => Ok(()),
+            _ => {
+                self.process_nodes(node)?;
+                self.process_connect_data_nodes(node)?;
+                self.process_security_nodes(node)
+            }
+        }
+    }
+
     /// Processes nodes in the DESCRIPTION section of a full descriptor.
     fn process_nodes(&mut self, node: &Node) -> Result<(), Error> {
         match node.key() {
@@ -519,7 +537,8 @@ impl Description {
             "ssl_server_dn_match" => {
                 self.ssl_server_dn_match = Some(node.as_bool()?);
             }
-            "wallet_location" => {
+            // MY_WALLET_DIRECTORY is the name in Oracle Net's configuration.
+            "wallet_location" | "my_wallet_directory" => {
                 self.wallet_location = Some(node.as_str()?);
             }
             _ => {}
@@ -552,6 +571,11 @@ impl Description {
     /// Returns whether source routing should be used.
     fn source_route(&self) -> bool {
         self.source_route.unwrap_or(false)
+    }
+
+    /// Returns the wallet location given in the connect string, if any.
+    pub(crate) fn wallet_location(&self) -> Option<&str> {
+        self.wallet_location.as_deref()
     }
 
     /// Returns whether SSL server DN matching should take place.

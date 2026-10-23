@@ -262,3 +262,46 @@ fn test_3304() {
         )
     ));
 }
+
+#[test]
+/// Verifies that the parameters of an easy connect string apply as in a full
+/// descriptor (MY_WALLET_DIRECTORY being the descriptor's name for
+/// wallet_location), and that malformed ones are an error.
+fn test_3305() -> Result<(), oracledb::Error> {
+    let easy = oracledb::Config::default().set_connect_string(
+        "tcps://host_3305:2484/service_3305?wallet_location=/wallet_3305\
+         &SSL_SERVER_DN_MATCH=off&retry_count=3&pool_boundary=statement",
+    )?;
+    let full = oracledb::Config::default().set_connect_string(
+        "(DESCRIPTION=(RETRY_COUNT=3)\
+         (ADDRESS=(PROTOCOL=tcps)(HOST=host_3305)(PORT=2484))\
+         (CONNECT_DATA=(SERVICE_NAME=service_3305)(POOL_BOUNDARY=statement))\
+         (SECURITY=(SSL_SERVER_DN_MATCH=off)\
+         (MY_WALLET_DIRECTORY=/wallet_3305)))",
+    )?;
+    assert_eq!(easy.get_connect_descriptor(), full.get_connect_descriptor());
+    assert!(
+        easy.get_connect_descriptor()
+            .contains("(SECURITY=(MY_WALLET_DIRECTORY=/wallet_3305))"),
+        "{}",
+        easy.get_connect_descriptor()
+    );
+    for value in [
+        "host_3305/service_3305?retry_count",
+        "host_3305/service_3305?retry_count=x",
+        "host_3305/service_3305?=3",
+    ] {
+        let Err(error) = oracledb::Config::default().set_connect_string(value)
+        else {
+            panic!("{value} was accepted");
+        };
+        assert!(
+            matches!(
+                error.kind(),
+                oracledb::ErrorKind::InvalidConnectString(_, _)
+            ),
+            "{value}: {error}"
+        );
+    }
+    Ok(())
+}
