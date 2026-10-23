@@ -330,3 +330,38 @@ fn test_2610(conn: oracledb::Connection) -> Result<(), oracledb::Error> {
     assert_eq!(columns[2].domain(), Some(("SYS", "POSITIVE_NUMBER_D")));
     Ok(())
 }
+
+#[rstest]
+/// Tests the data type names of NUMBER and FLOAT columns.
+fn test_2611(conn: oracledb::Connection) -> Result<(), oracledb::Error> {
+    let _guard = common::create_table(
+        &conn,
+        "test_2611",
+        r#"
+        number_col number,
+        number_p_col number(9),
+        number_ps_col number(9,2),
+        float_col float,
+        float_p_col float(10),
+        real_col real
+        "#,
+    )?;
+    let cursor = conn.query("select * from test_2611", &[])?;
+    let names: Vec<String> =
+        cursor.columns().iter().map(|c| c.data_type()).collect();
+    assert_eq!(
+        names,
+        [
+            "NUMBER",
+            "NUMBER(9)",
+            "NUMBER(9,2)",
+            "FLOAT(126)",
+            "FLOAT(10)",
+            "FLOAT(63)"
+        ]
+    );
+    let cursor =
+        conn.query("select cast(1.25 as float(10)) from dual", &[])?;
+    assert_eq!(cursor.columns()[0].data_type(), "FLOAT(10)");
+    Ok(())
+}
