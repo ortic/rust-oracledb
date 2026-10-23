@@ -298,3 +298,23 @@ fn test_2515(conn: oracledb::Connection) -> Result<(), oracledb::Error> {
     assert_eq!(common::temporary_lob_count(&conn)?, 0);
     Ok(())
 }
+
+#[rstest]
+/// Validates that a query fetching a CLOB runs again after an error while its
+/// rows were fetched (during the define, which closes the cursor).
+fn test_2516(conn: oracledb::Connection) -> Result<(), oracledb::Error> {
+    let sql = "select to_clob(:1 || to_number(:2)) from dual";
+    let query = |value: &str| -> Result<String, oracledb::Error> {
+        let stmt = conn.statement(sql)?.build()?;
+        let mut cursor = stmt.query(&[&"text", &value])?;
+        cursor.next().unwrap()?.get::<String>(0)
+    };
+    assert_eq!(query("1")?, "text1");
+    let error = query("x").unwrap_err();
+    assert!(
+        matches!(error.kind(), oracledb::ErrorKind::DbError(db) if db.code() == 1722),
+        "{error}"
+    );
+    assert_eq!(query("1")?, "text1");
+    Ok(())
+}

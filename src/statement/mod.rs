@@ -223,9 +223,13 @@ impl CachedStatement {
         Ok(checked_binds)
     }
 
-    /// Clears the database cursor id.
+    /// Clears the database cursor id. A define the cursor still needed is
+    /// moot: the next execute parses again (and finds out again whether a
+    /// define is needed), so it must not be a define-only execute without
+    /// binds.
     pub(crate) fn clear_cursor(&mut self) {
         self.cursor_id = 0;
+        self.requires_define = false;
     }
 
     /// Clears the flag indicating that a define is required.
