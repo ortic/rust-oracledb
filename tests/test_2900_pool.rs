@@ -36,12 +36,16 @@ fn pool_config(
     connection_increment: usize,
 ) -> Result<oracledb::PoolConfig, oracledb::Error> {
     let test_config = oracledb::get_test_config();
-    Ok(oracledb::PoolConfig::default()
+    let config = oracledb::PoolConfig::default()
         .set_credentials(&test_config.user, &test_config.password)
         .set_connect_string(&test_config.connect_string)?
         .set_min_connections(min_connections)
         .set_max_connections(max_connections)
-        .set_connection_increment(connection_increment))
+        .set_connection_increment(connection_increment);
+    Ok(match test_config.config.wallet_location() {
+        Some(location) => config.set_wallet_location(location),
+        None => config,
+    })
 }
 
 #[test]

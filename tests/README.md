@@ -41,6 +41,10 @@ suite.
 * `RSO_TEST_ADMIN_PASSWORD` provides the password of the DBA user will be used
   for running the test suite.
 
+* `RSO_TEST_WALLET_LOCATION` optionally specifies the directory of the wallet
+  (ewallet.pem) to use with a TLS connect string (`tcps://`), e.g. the
+  certificate of a database with a self-signed one.
+
 * `RSO_TEST_DIRECTORY_NAME` specifies an existing DIRECTORY object for tests
   that create server files. The referenced path must exist and be writable by
   the OS user running the database.

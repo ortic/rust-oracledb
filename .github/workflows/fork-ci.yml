@@ -37,6 +37,7 @@ jobs:
           ORACLE_PASSWORD: oracle
         ports:
           - 1521:1521
+          - 2484:2484
         options: >-
           --health-cmd healthcheck.sh
           --health-interval 10s
@@ -78,3 +79,16 @@ jobs:
                 unlimited tablespace to rsotest;
           EOF
       - run: cargo test --all-features --no-fail-fast
+      # The suite again over TLS (cancelling included), with a self-signed
+      # certificate; enable-tcps.sh runs Oracle's wallet tool on Java.
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: "21"
+      - name: Enable TLS (TCPS) on port 2484
+        run: .github/scripts/enable-tcps.sh ${{ job.services.oracle.id }} "$RUNNER_TEMP/wallet"
+      - name: Test over TLS
+        run: cargo test --all-features --no-fail-fast
+        env:
+          RSO_TEST_CONNECT_STRING: tcps://localhost:2484/FREEPDB1
+          RSO_TEST_WALLET_LOCATION: ${{ runner.temp }}/wallet

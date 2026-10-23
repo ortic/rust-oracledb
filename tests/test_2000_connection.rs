@@ -306,12 +306,11 @@ fn test_2010() -> Result<(), oracledb::Error> {
         &[],
     )?;
     let result = (|| {
-        let config = oracledb::Config::default()
-            .set_credentials(
-                &format!("{proxy_user}[{}]", test_config.user),
-                proxy_password,
-            )
-            .set_connect_string(&test_config.connect_string)?;
+        // The test configuration (with its wallet, if any) as the proxy.
+        let config = test_config.config.clone().set_credentials(
+            &format!("{proxy_user}[{}]", test_config.user),
+            proxy_password,
+        );
         let conn = oracledb::connect(config)?;
         let row = conn.query_row(
             "select sys_context('userenv', 'session_user'),

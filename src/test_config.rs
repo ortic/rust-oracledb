@@ -47,9 +47,15 @@ static TEST_CONFIG: LazyLock<TestConfig> = LazyLock::new(|| {
     let user = get_env_value("RSO_TEST_MAIN_USER", "rsotest");
     let password = get_env_value("RSO_TEST_MAIN_PASSWORD", "");
     let connect_string = get_env_value("RSO_TEST_CONNECT_STRING", "");
+    // for TLS (tcps://) with a certificate that isn't publicly trusted
+    let with_wallet =
+        |config: Config| match env::var("RSO_TEST_WALLET_LOCATION") {
+            Ok(location) => config.set_wallet_location(location),
+            Err(_) => config,
+        };
 
     // setup admin configuration and validate it
-    let base_admin_config = Config::default()
+    let base_admin_config = with_wallet(Config::default())
         .set_credentials(&admin_user, &admin_password)
         .set_connect_string(&connect_string)
         .expect("Invalid connect string");
@@ -63,7 +69,7 @@ static TEST_CONFIG: LazyLock<TestConfig> = LazyLock::new(|| {
 
     // setup regular test user configuration but do not validate it since the
     // test user may not have been created at this point!
-    let config = Config::default()
+    let config = with_wallet(Config::default())
         .set_credentials(&user, &password)
         .set_connect_string(&connect_string)
         .expect("Invalid connect string");
