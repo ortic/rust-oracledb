@@ -324,3 +324,97 @@ fn test_1211() {
         "2026-03-01T00:15:00.000000000-06:00"
     );
 }
+
+#[rstest]
+/// test that TIMESTAMP WITH TIME ZONE values with a time zone region come back
+/// with that region, at the right instant, for every region the database
+/// knows; and in its current offset, which the driver takes from the IANA
+/// rules of chrono-tz rather than the server's time zone file
+fn test_1212(conn: oracledb::Connection) -> Result<(), oracledb::Error> {
+    // Rules changed after time zone file 43 (Paraguay keeps -03 since 2024).
+    const NEWER_RULES: [&str; 1] = ["America/Asuncion"];
+    let rows = conn.query(
+        r#"
+        select
+            ts,
+            extract(timezone_region from ts),
+            extract(timezone_hour from ts) * 60
+                + extract(timezone_minute from ts),
+            to_char(sys_extract_utc(ts), 'YYYY-MM-DD HH24:MI:SS')
+        from (
+            select from_tz(d.local_time, r.tzname) ts
+            from (select distinct tzname from v$timezone_names) r,
+                (
+                    select timestamp '2026-07-01 12:00:00' local_time
+                    from dual
+                    union all
+                    select timestamp '2026-01-15 12:00:00' from dual
+                    union all
+                    select timestamp '1950-07-15 12:00:00' from dual
+                    union all
+                    select timestamp '1880-01-01 12:00:00' from dual
+                ) d
+        )
+        "#,
+        &[],
+    )?;
+    let mut count = 0;
+    let mut mismatches = Vec::new();
+    for row in rows {
+        let row = row?;
+        let ts: oracledb::OracleTimestamp = row.get(0)?;
+        let region: String = row.get(1)?;
+        let offset = i32::from(ts.tz_hour_offset()) * 60
+            + i32::from(ts.tz_minute_offset());
+        let utc = chrono::NaiveDateTime::try_from(ts)?
+            - chrono::Duration::minutes(offset.into());
+        let expected_utc = chrono::NaiveDateTime::parse_from_str(
+            &row.get::<String>(3)?,
+            "%Y-%m-%d %H:%M:%S",
+        )
+        .unwrap();
+        let current = ts.year() == 2026;
+        if ts.tz_region() != Some(region.as_str())
+            || utc != expected_utc
+            || (current
+                && offset != row.get::<i32>(2)?
+                && !NEWER_RULES.contains(&region.as_str()))
+        {
+            mismatches.push(format!("{region}: {ts} (UTC {expected_utc})"));
+        }
+        count += 1;
+    }
+    assert!(count > 2000, "{count}");
+    assert!(
+        mismatches.is_empty(),
+        "{} of {count}:\n{}",
+        mismatches.len(),
+        mismatches.join("\n")
+    );
+    Ok(())
+}
+
+#[rstest]
+/// Verifies the display of values with a time zone region and with an offset.
+fn test_1213(conn: oracledb::Connection) -> Result<(), oracledb::Error> {
+    let row = conn.query_row(
+        r#"
+        select
+            from_tz(timestamp '2026-07-01 12:00:00', 'Europe/Zurich'),
+            from_tz(timestamp '2026-01-15 12:00:00', 'UTC'),
+            from_tz(timestamp '2026-07-01 12:00:00', '+02:00')
+        from dual
+        "#,
+        &[],
+    )?;
+    let display = |i| -> Result<String, oracledb::Error> {
+        Ok(row.get::<oracledb::OracleTimestamp>(i)?.to_string())
+    };
+    assert_eq!(
+        display(0)?,
+        "2026-07-01T12:00:00.000000000+02:00[Europe/Zurich]"
+    );
+    assert_eq!(display(1)?, "2026-01-15T12:00:00.000000000+00:00[UTC]");
+    assert_eq!(display(2)?, "2026-07-01T12:00:00.000000000+02:00");
+    Ok(())
+}

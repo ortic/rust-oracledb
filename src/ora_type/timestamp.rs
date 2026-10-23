@@ -33,6 +33,7 @@ use chrono::Timelike;
 use std::fmt;
 use std::fmt::Write;
 
+use super::tz_regions;
 use crate::constants;
 use crate::db_type::DbType;
 use crate::error::Error;
@@ -53,6 +54,8 @@ pub struct OracleTimestamp {
     nanoseconds: u32,
     tz_hour_offset: i8,
     tz_minute_offset: i8,
+    /// The id of the value's time zone region, 0 for an offset.
+    tz_region_id: u16,
 }
 
 impl Default for OracleTimestamp {
@@ -67,6 +70,7 @@ impl Default for OracleTimestamp {
             nanoseconds: 0,
             tz_hour_offset: 0,
             tz_minute_offset: 0,
+            tz_region_id: 0,
         }
     }
 }
@@ -119,6 +123,7 @@ impl OracleTimestamp {
             nanoseconds: 0,
             tz_hour_offset: 0,
             tz_minute_offset: 0,
+            tz_region_id: 0,
         }
     }
 
@@ -144,6 +149,7 @@ impl OracleTimestamp {
             nanoseconds,
             tz_hour_offset: 0,
             tz_minute_offset: 0,
+            tz_region_id: 0,
         }
     }
 
@@ -172,6 +178,7 @@ impl OracleTimestamp {
             nanoseconds,
             tz_hour_offset,
             tz_minute_offset,
+            tz_region_id: 0,
         }
     }
 
@@ -188,6 +195,13 @@ impl OracleTimestamp {
     /// Returns the time zone minute offset of the timestamp.
     pub fn tz_minute_offset(&self) -> i8 {
         self.tz_minute_offset
+    }
+
+    /// Returns the name of the time zone region of a TIMESTAMP WITH TIME ZONE
+    /// value (e.g. `Europe/Zurich`), or None if it has an offset. A region
+    /// this driver doesn't know (one newer than its table) comes back in UTC.
+    pub fn tz_region(&self) -> Option<&'static str> {
+        tz_regions::name(self.tz_region_id)
     }
 
     /// Returns the year of the timestamp.
@@ -279,19 +293,24 @@ impl fmt::Display for OracleTimestamp {
             self.nanoseconds
         )?;
         let offset = self.tz_offset_minutes();
-        if offset == 0 {
-            f.write_char('Z')
-        } else {
-            // For a negative offset both parts are negative (-3 and -30 for
-            // -03:30), as the database sends them.
-            let sign = if offset < 0 { '-' } else { '+' };
-            write!(
-                f,
-                "{}{:02}:{:02}",
-                sign,
-                offset.abs() / 60,
-                offset.abs() % 60
-            )
+        let region = self.tz_region();
+        if offset == 0 && region.is_none() {
+            return f.write_char('Z');
+        }
+        // For a negative offset both parts are negative (-3 and -30 for
+        // -03:30), as the database sends them.
+        let sign = if offset < 0 { '-' } else { '+' };
+        write!(
+            f,
+            "{}{:02}:{:02}",
+            sign,
+            offset.abs() / 60,
+            offset.abs() % 60
+        )?;
+        // A region follows its offset in brackets, as in RFC 9557.
+        match region {
+            Some(region) => write!(f, "[{region}]"),
+            None => Ok(()),
         }
     }
 }
@@ -304,18 +323,18 @@ impl FromBuf for OracleTimestamp {
         if buf.len() >= constants::ORA_TYPE_SIZE_TIMESTAMP {
             nanoseconds = u32::from_be_bytes(buf[7..11].try_into().unwrap());
         }
-        if buf.len() == constants::ORA_TYPE_SIZE_TIMESTAMP_TZ
-            && buf[11] != 0
-            && buf[12] != 0
-        {
+        let mut tz_region_id = 0;
+        if buf.len() == constants::ORA_TYPE_SIZE_TIMESTAMP_TZ {
             if buf[11] & 0x80 != 0 {
-                todo!();
+                // A region id; its second byte is 0 for some regions.
+                tz_region_id =
+                    u16::from(buf[11] & 0x7f) << 6 | u16::from(buf[12] >> 2);
+            } else if buf[11] != 0 && buf[12] != 0 {
+                tz_hour_offset =
+                    buf[11].wrapping_sub(constants::TZ_HOUR_OFFSET) as i8;
+                tz_minute_offset =
+                    buf[12].wrapping_sub(constants::TZ_MINUTE_OFFSET) as i8;
             }
-            tz_hour_offset =
-                buf[11].wrapping_sub(constants::TZ_HOUR_OFFSET) as i8;
-
-            tz_minute_offset =
-                buf[12].wrapping_sub(constants::TZ_MINUTE_OFFSET) as i8;
         }
         let value = Self {
             year: ((buf[0] as i16 - 100) * 100 + buf[1] as i16 - 100),
@@ -327,6 +346,29 @@ impl FromBuf for OracleTimestamp {
             nanoseconds,
             tz_hour_offset,
             tz_minute_offset,
+            tz_region_id: 0,
+        };
+        // A region gets its offset at that (UTC) time; for a negative offset
+        // both parts are negative.
+        let region_offset =
+            tz_regions::name(tz_region_id).and_then(|region| {
+                tz_regions::offset_minutes(
+                    region,
+                    value.year,
+                    value.month,
+                    value.day,
+                    value.hour,
+                    value.minute,
+                )
+            });
+        let value = match region_offset {
+            Some(offset) => Self {
+                tz_hour_offset: (offset / 60) as i8,
+                tz_minute_offset: (offset % 60) as i8,
+                tz_region_id,
+                ..value
+            },
+            None => value,
         };
         // The date and time of a value with a time zone are sent in UTC, but
         // the fields hold them in the value's own time zone, as
@@ -376,6 +418,7 @@ impl From<chrono::NaiveDateTime> for OracleTimestamp {
             nanoseconds: value.nanosecond(),
             tz_hour_offset: 0,
             tz_minute_offset: 0,
+            tz_region_id: 0,
         }
     }
 }

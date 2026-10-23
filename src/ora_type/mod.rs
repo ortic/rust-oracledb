@@ -32,6 +32,7 @@ mod interval_ds;
 mod interval_ym;
 mod number;
 mod timestamp;
+mod tz_regions;
 
 pub use interval_ds::OracleIntervalDS;
 pub use interval_ym::OracleIntervalYM;
