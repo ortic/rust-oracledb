@@ -81,6 +81,15 @@ impl Statement {
         )
     }
 
+    /// Returns the error of a single row executed with batch errors on, which
+    /// the database reports as a batch error.
+    fn check_batch_errors(response: &mut Response) -> Result<(), Error> {
+        match response.take_batch_errors().into_iter().next() {
+            Some(error) => Err(Error::db_error(error)),
+            None => Ok(()),
+        }
+    }
+
     /// Transfers the cached statement; the caller must return it to the client.
     pub(crate) fn into_cached_statement(mut self) -> CachedStatement {
         let empty = CachedStatement::create_empty(
@@ -132,6 +141,7 @@ impl Statement {
         let params: BindParameters = binding.as_slice().into();
         self.statement.check_binds(&params)?;
         let mut response = self.get_execute_response(params, false)?;
+        Self::check_batch_errors(&mut response)?;
         Ok(ExecResult::new(&self.statement, &mut response))
     }
 
@@ -163,6 +173,7 @@ impl Statement {
         let params: BindParameters = binding.as_slice().into();
         self.statement.check_binds(&params)?;
         let mut response = self.get_execute_response(params, false)?;
+        Self::check_batch_errors(&mut response)?;
         Ok(ExecResult::new(&self.statement, &mut response))
     }
 

@@ -77,6 +77,15 @@ impl<'sql> StatementBuilder<'sql> {
         self
     }
 
+    /// Specifies that a batch (Statement::execute_batch()) runs all of its
+    /// rows: a row that fails doesn't fail the batch, its error is in
+    /// ExecBatchResult::batch_errors() instead, with the row's index as the
+    /// error's offset. Only DML statements support this.
+    pub fn batch_errors(mut self) -> Self {
+        self.options.set_batch_errors();
+        self
+    }
+
     /// Specifies that LOB values should be fetched as LOB locators.
     pub fn fetch_lobs(mut self) -> Self {
         self.options.set_fetch_lobs();

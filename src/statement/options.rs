@@ -33,6 +33,7 @@ pub(crate) struct StatementOptions {
     prefetch_rows: u32,
     fetch_array_size: u32,
     fetch_lobs: bool,
+    batch_errors: bool,
 }
 
 impl StatementOptions {
@@ -41,7 +42,16 @@ impl StatementOptions {
             prefetch_rows: 2,
             fetch_array_size: 100,
             fetch_lobs: false,
+            batch_errors: false,
         }
+    }
+
+    pub(crate) fn batch_errors(&self) -> bool {
+        self.batch_errors
+    }
+
+    pub(crate) fn set_batch_errors(&mut self) {
+        self.batch_errors = true;
     }
 
     pub(crate) fn fetch_array_size(&self) -> u32 {

@@ -292,7 +292,7 @@ impl ExecuteMessage<'_, '_> {
         ExecuteMessage {
             parse_only,
             scroll_operation: false,
-            batch_errors: false,
+            batch_errors: statement.options().batch_errors(),
             array_dml_row_counts: false,
             num_execs: params.num_rows().try_into().unwrap(),
             num_fetch_columns: 0,
@@ -399,6 +399,8 @@ impl Message for ExecuteMessage<'_, '_> {
             || self.parse_only
             || self.statement.requires_define()
             || self.statement.is_ddl()
+            // A re-execute can't ask for batch errors.
+            || self.batch_errors
         {
             self.write_full_execute(client, buf);
         } else {

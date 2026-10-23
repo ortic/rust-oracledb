@@ -779,3 +779,75 @@ fn test_2727(conn: oracledb::Connection) -> Result<(), oracledb::Error> {
     let _ = conn.query(sql, &[])?;
     Ok(())
 }
+
+#[rstest]
+/// Tests that a batch with batch errors on runs all of its rows and returns
+/// the failed rows' errors with their indexes, also when the cached statement
+/// runs again and in a long batch, and that a single execute with batch
+/// errors on still fails.
+fn test_2728(conn: oracledb::Connection) -> Result<(), oracledb::Error> {
+    let _guard = common::create_table(
+        &conn,
+        "test_2728",
+        "id number primary key, value varchar2(5)",
+    )?;
+    let sql = "insert into test_2728 (id, value) values (:1, :2)";
+    let rows: [&[&dyn oracledb::ToDbValue]; 5] = [
+        &[&1, &"one"],
+        &[&1, &"dup"],
+        &[&2, &"two"],
+        &[&3, &"too long"],
+        &[&4, &"four"],
+    ];
+    // The second time, the statement comes from the cache with its cursor.
+    for _ in 0..2 {
+        conn.execute("truncate table test_2728", &[])?;
+        let mut stmt = conn.statement(sql)?.batch_errors().build()?;
+        let result =
+            stmt.execute_batch(oracledb::BindParameters::Slice(&rows))?;
+        assert_eq!(result.rows_affected(), 3);
+        let errors: Vec<(usize, usize)> = result
+            .batch_errors()
+            .iter()
+            .map(|e| (e.offset(), e.code()))
+            .collect();
+        assert_eq!(errors, [(1, 1), (3, 12899)]);
+        assert!(
+            result.batch_errors()[0].message().starts_with("ORA-00001"),
+            "{}",
+            result.batch_errors()[0].message()
+        );
+        let row = conn.query_row("select count(*) from test_2728", &[])?;
+        assert_eq!(row.get::<i32>(0)?, 3);
+    }
+
+    // Many rows, every third one failing.
+    conn.execute("truncate table test_2728", &[])?;
+    let ids: Vec<i32> = (0..3000)
+        .map(|i| if i % 3 == 2 { 0 } else { i + 1 })
+        .collect();
+    let values: Vec<[&dyn oracledb::ToDbValue; 2]> = ids
+        .iter()
+        .map(|id| [id as &dyn oracledb::ToDbValue, &"x"])
+        .collect();
+    let rows: Vec<&[&dyn oracledb::ToDbValue]> =
+        values.iter().map(|r| r.as_slice()).collect();
+    let mut stmt = conn.statement(sql)?.batch_errors().build()?;
+    let result = stmt.execute_batch(oracledb::BindParameters::Slice(&rows))?;
+    // Row 2 inserts id 0; every later third row is a duplicate of it.
+    assert_eq!(result.rows_affected(), 2001);
+    let offsets: Vec<usize> =
+        result.batch_errors().iter().map(|e| e.offset()).collect();
+    assert_eq!(offsets, (5..3000).step_by(3).collect::<Vec<_>>());
+
+    let mut stmt = conn.statement(sql)?.batch_errors().build()?;
+    let Err(error) = stmt.execute(&[&1, &"again"]) else {
+        panic!("a duplicate key with batch errors on executed");
+    };
+    assert!(
+        matches!(error.kind(), oracledb::ErrorKind::DbError(db) if db.code() == 1),
+        "{error}"
+    );
+    conn.rollback()?;
+    Ok(())
+}

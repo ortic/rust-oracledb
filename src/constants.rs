@@ -149,6 +149,7 @@ pub const PROTOCOL_VERSION_18: u16 = 318;
 pub const PROTOCOL_VERSION_23: u16 = 319;
 
 // database error constants
+pub const DB_ERR_NUM_ARRAY_DML_ERRORS: usize = 24381;
 pub const DB_ERR_NUM_CANNOT_INSERT_NULL: usize = 1400;
 pub const DB_ERR_NUM_CHECK_CONSTRAINT_VIOLATED: usize = 2290;
 pub const DB_ERR_NUM_CHILD_RECORD_FOUND: usize = 2292;

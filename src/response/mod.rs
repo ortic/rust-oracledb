@@ -76,6 +76,14 @@ impl Response {
         self.error_info.as_mut().and_then(|i| i.take_db_error())
     }
 
+    /// Takes the errors of a batch's rows (with batch errors on).
+    pub(crate) fn take_batch_errors(&mut self) -> Vec<DbError> {
+        self.error_info
+            .as_mut()
+            .map(|i| i.take_batch_errors())
+            .unwrap_or_default()
+    }
+
     /// Adds packets to the response in preparation for an attempt at
     /// deserializing the database response. Prior to Oracle Database 26ai, the
     /// database does not give any indication of when the end of a response has

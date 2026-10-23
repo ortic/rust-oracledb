@@ -39,6 +39,7 @@ pub(crate) struct ErrorInfo {
     cursor_id: u16,
     flags: u8,
     rowcount: u64,
+    batch_errors: Vec<DbError>,
 }
 
 impl ErrorInfo {
@@ -69,18 +70,7 @@ impl ErrorInfo {
         if resp.read_ub4()? > 0 {
             let _logical_rowid = resp.read_bytes_with_length()?;
         }
-        if resp.read_ub2()? > 0 {
-            // batch errors
-            todo!();
-        }
-        if resp.read_ub4()? > 0 {
-            // batch error offsets
-            todo!();
-        }
-        if resp.read_ub2()? > 0 {
-            // batch error messages
-            todo!();
-        }
+        let batch_errors = Self::deserialize_batch_errors(resp)?;
         let error_num = resp.read_ub4()?;
         let rowcount = resp.read_ub8()?;
         if client.supports_ttc_field_version(constants::TTC_FIELD_VERSION_20_1)
@@ -97,14 +87,75 @@ impl ErrorInfo {
                 offset: error_pos as usize,
                 message: message.trim_end().to_string(),
             })
-        };
+        }
+        // With batch errors, the rows' errors are in batch_errors instead.
+        .filter(|e| e.code != constants::DB_ERR_NUM_ARRAY_DML_ERRORS);
 
         Ok(ErrorInfo {
             cursor_id,
             flags,
             rowcount,
             db_error,
+            batch_errors,
         })
+    }
+
+    /// Deserializes the errors of a batch's rows (with batch errors on): an
+    /// array of error codes, one of the rows' offsets in the batch and one of
+    /// the messages.
+    fn deserialize_batch_errors(
+        resp: &mut Response,
+    ) -> Result<Vec<DbError>, Error> {
+        let mut errors = Vec::new();
+        let num_errors = resp.read_ub2()?;
+        if num_errors > 0 {
+            let first_byte = resp.read_u8()?;
+            for _ in 0..num_errors {
+                if first_byte == constants::TTC_LONG_LENGTH_INDICATOR {
+                    resp.read_ub4()?; // chunk length
+                }
+                errors.push(DbError {
+                    code: resp.read_ub2()?.into(),
+                    offset: 0,
+                    message: String::new(),
+                });
+            }
+            if first_byte == constants::TTC_LONG_LENGTH_INDICATOR {
+                resp.advance(1)?; // end marker
+            }
+        }
+        let num_offsets = resp.read_ub4()?;
+        if num_offsets > 0 {
+            let first_byte = resp.read_u8()?;
+            for i in 0..num_offsets as usize {
+                if first_byte == constants::TTC_LONG_LENGTH_INDICATOR {
+                    resp.read_ub4()?; // chunk length
+                }
+                let offset = resp.read_ub4()? as usize;
+                if let Some(error) = errors.get_mut(i) {
+                    error.offset = offset;
+                }
+            }
+            if first_byte == constants::TTC_LONG_LENGTH_INDICATOR {
+                resp.advance(1)?; // end marker
+            }
+        }
+        let num_messages = resp.read_ub2()?;
+        if num_messages > 0 {
+            resp.advance(1)?; // packed size
+            for i in 0..num_messages as usize {
+                resp.read_ub2()?; // chunk length
+                let message =
+                    resp.read_utf8_with_length()?.trim_end().to_string();
+                if let Some(error) = errors.get_mut(i) {
+                    error.message = message;
+                }
+                resp.advance(2)?; // end marker
+            }
+        }
+        // The database doesn't list them in the rows' order.
+        errors.sort_by_key(|e| e.offset);
+        Ok(errors)
     }
 
     /// Returns the cursor id.
@@ -125,6 +176,11 @@ impl ErrorInfo {
     /// Takes the error message from the response and returns it.
     pub(crate) fn take_db_error(&mut self) -> Option<DbError> {
         self.db_error.take()
+    }
+
+    /// Takes the errors of a batch's rows from the response.
+    pub(crate) fn take_batch_errors(&mut self) -> Vec<DbError> {
+        std::mem::take(&mut self.batch_errors)
     }
 
     /// Transfers information from another error info structure that was
