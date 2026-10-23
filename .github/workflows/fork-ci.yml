@@ -1,0 +1,70 @@
+# CI of the ortic fork (branch `pythia`, used by github.com/ortic/pythia):
+# lints and runs the driver's own test suite against Oracle Free. Not part of
+# upstream oracle/rust-oracledb.
+name: Fork CI
+
+on:
+  push:
+    branches: [pythia]
+  pull_request:
+  # Weekly, to notice a changed Oracle Free image before the next push does.
+  schedule:
+    - cron: "0 4 * * 1"
+  workflow_dispatch:
+
+env:
+  CARGO_TERM_COLOR: always
+  CARGO_INCREMENTAL: 0
+
+jobs:
+  lint:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt, clippy
+      - uses: Swatinem/rust-cache@v2
+      - run: cargo fmt --check
+      - run: cargo clippy --all-targets --all-features -- -D warnings
+
+  test:
+    runs-on: ubuntu-latest
+    services:
+      oracle:
+        image: gvenzl/oracle-free:23-slim
+        env:
+          ORACLE_PASSWORD: oracle
+        ports:
+          - 1521:1521
+        options: >-
+          --health-cmd healthcheck.sh
+          --health-interval 10s
+          --health-timeout 5s
+          --health-retries 30
+    env:
+      RSO_TEST_MAIN_USER: rsotest
+      RSO_TEST_MAIN_PASSWORD: Rsotest_1
+      RSO_TEST_CONNECT_STRING: localhost:1521/FREEPDB1
+      RSO_TEST_ADMIN_USER: system
+      RSO_TEST_ADMIN_PASSWORD: oracle
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - run: cargo build --all-targets --all-features
+      # What `cargo run --bin create_test_schema` grants, except CTXAPP:
+      # Oracle Text isn't part of Oracle Free.
+      - name: Create the test user
+        run: |
+          docker exec -i ${{ job.services.oracle.id }} sqlplus -s system/oracle@FREEPDB1 <<'EOF'
+          whenever sqlerror exit failure
+          create user rsotest identified by Rsotest_1;
+          grant create session, create table, create procedure, create type,
+                create view, select any dictionary, change notification,
+                unlimited tablespace to rsotest;
+          EOF
+      # Four threads: with more, Oracle Free's listener refuses some of the
+      # connections opened at once (ORA-12516) although the process limit
+      # isn't reached.
+      - run: cargo test --all-features --no-fail-fast -- --test-threads=4
