@@ -148,7 +148,8 @@ impl OracleTimestamp {
     }
 
     /// Creates a new timestamp given all components, including the time zone
-    /// offsets.
+    /// offsets. The date and time are in that time zone. For a negative
+    /// offset both offsets are negative (-3 and -30 for -03:30).
     #[allow(clippy::too_many_arguments)]
     pub fn new_timestamp_tz(
         year: i16,
@@ -193,6 +194,75 @@ impl OracleTimestamp {
     pub fn year(&self) -> i16 {
         self.year
     }
+
+    /// Returns the time zone offset in minutes.
+    fn tz_offset_minutes(&self) -> i32 {
+        i32::from(self.tz_hour_offset) * 60 + i32::from(self.tz_minute_offset)
+    }
+
+    /// Returns the timestamp with its date and time moved by the given number
+    /// of minutes, less than a day either way. Oracle's calendar is Julian
+    /// before October 15, 1582 and has no year 0, so this doesn't go through
+    /// chrono.
+    fn add_minutes(mut self, minutes: i32) -> Self {
+        let minutes =
+            i32::from(self.hour) * 60 + i32::from(self.minute) + minutes;
+        let minute_of_day = minutes.rem_euclid(24 * 60);
+        self.hour = (minute_of_day / 60) as u8;
+        self.minute = (minute_of_day % 60) as u8;
+        match minutes.div_euclid(24 * 60) {
+            1 => self.next_day(),
+            -1 => self.previous_day(),
+            _ => {}
+        }
+        self
+    }
+
+    fn next_day(&mut self) {
+        if (self.year, self.month, self.day) == (1582, 10, 4) {
+            self.day = 15;
+        } else if self.day < days_in_month(self.year, self.month) {
+            self.day += 1;
+        } else if self.month < 12 {
+            self.month += 1;
+            self.day = 1;
+        } else {
+            self.year = if self.year == -1 { 1 } else { self.year + 1 };
+            self.month = 1;
+            self.day = 1;
+        }
+    }
+
+    fn previous_day(&mut self) {
+        if (self.year, self.month, self.day) == (1582, 10, 15) {
+            self.day = 4;
+        } else if self.day > 1 {
+            self.day -= 1;
+        } else if self.month > 1 {
+            self.month -= 1;
+            self.day = days_in_month(self.year, self.month);
+        } else {
+            self.year = if self.year == 1 { -1 } else { self.year - 1 };
+            self.month = 12;
+            self.day = 31;
+        }
+    }
+}
+
+/// Returns the number of days in a month of Oracle's calendar.
+fn days_in_month(year: i16, month: u8) -> u8 {
+    match month {
+        4 | 6 | 9 | 11 => 30,
+        2 => {
+            let leap = if year < 1583 {
+                year % 4 == 0
+            } else {
+                year % 4 == 0 && (year % 100 != 0 || year % 400 == 0)
+            };
+            if leap { 29 } else { 28 }
+        }
+        _ => 31,
+    }
 }
 
 impl fmt::Display for OracleTimestamp {
@@ -208,13 +278,19 @@ impl fmt::Display for OracleTimestamp {
             self.second,
             self.nanoseconds
         )?;
-        if self.tz_hour_offset == 0 && self.tz_minute_offset == 0 {
+        let offset = self.tz_offset_minutes();
+        if offset == 0 {
             f.write_char('Z')
         } else {
+            // For a negative offset both parts are negative (-3 and -30 for
+            // -03:30), as the database sends them.
+            let sign = if offset < 0 { '-' } else { '+' };
             write!(
                 f,
-                "{:+03}:{:02}",
-                self.tz_hour_offset, self.tz_minute_offset
+                "{}{:02}:{:02}",
+                sign,
+                offset.abs() / 60,
+                offset.abs() % 60
             )
         }
     }
@@ -241,7 +317,7 @@ impl FromBuf for OracleTimestamp {
             tz_minute_offset =
                 buf[12].wrapping_sub(constants::TZ_MINUTE_OFFSET) as i8;
         }
-        Self {
+        let value = Self {
             year: ((buf[0] as i16 - 100) * 100 + buf[1] as i16 - 100),
             month: buf[2],
             day: buf[3],
@@ -251,7 +327,11 @@ impl FromBuf for OracleTimestamp {
             nanoseconds,
             tz_hour_offset,
             tz_minute_offset,
-        }
+        };
+        // The date and time of a value with a time zone are sent in UTC, but
+        // the fields hold them in the value's own time zone, as
+        // new_timestamp_tz() takes them.
+        value.add_minutes(value.tz_offset_minutes())
     }
 }
 

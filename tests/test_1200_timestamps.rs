@@ -122,7 +122,7 @@ fn test_1204(conn: oracledb::Connection) -> Result<(), oracledb::Error> {
     for row in cursor {
         let row = row?;
         let value: oracledb::OracleTimestamp = row.get(0)?;
-        assert_eq!(value.to_string(), "2025-10-31T17:52:15.456000000-06:00");
+        assert_eq!(value.to_string(), "2025-10-31T11:52:15.456000000-06:00");
     }
     Ok(())
 }
@@ -233,4 +233,94 @@ fn test_1209() {
     assert_eq!(timestamp.tz_hour_offset(), 5);
     assert_eq!(timestamp.tz_minute_offset(), 30);
     assert_eq!(timestamp.to_string(), "2026-09-03T14:05:06.123456789+05:30");
+}
+
+#[rstest]
+/// test that TIMESTAMP WITH TIME ZONE values are in their own time zone, also
+/// when that is another day than in UTC
+fn test_1210(conn: oracledb::Connection) -> Result<(), oracledb::Error> {
+    for value in [
+        "2026-10-22 13:05:06 +02:00",
+        // UTC is the day before, or the day after.
+        "2026-01-01 01:30:00 +05:30",
+        "2025-12-31 22:00:00 -03:30",
+        "2026-03-01 00:15:00 -00:30",
+        "2024-03-01 00:30:00 +14:00",
+        // Julian calendar, the switch to the Gregorian one, no year 0.
+        "1500-03-01 00:30:00 +01:00",
+        "1582-10-15 00:30:00 +01:00",
+        "1582-10-04 23:30:00 -01:00",
+        "0001-01-01 00:30:00 +01:00",
+    ] {
+        let row = conn.query_row(
+            r#"
+            select
+                ts,
+                to_number(to_char(ts, 'SYYYY')),
+                to_number(to_char(ts, 'MM')),
+                to_number(to_char(ts, 'DD')),
+                to_number(to_char(ts, 'HH24')),
+                to_number(to_char(ts, 'MI')),
+                to_number(to_char(ts, 'SS')),
+                extract(timezone_hour from ts) * 60
+                    + extract(timezone_minute from ts)
+            from (
+                select to_timestamp_tz(:1, 'YYYY-MM-DD HH24:MI:SS TZH:TZM') ts
+                from dual
+            )
+            "#,
+            &[&value],
+        )?;
+        let ts: oracledb::OracleTimestamp = row.get(0)?;
+        let fetched = (
+            i32::from(ts.year()),
+            i32::from(ts.month()),
+            i32::from(ts.day()),
+            i32::from(ts.hour()),
+            i32::from(ts.minute()),
+            i32::from(ts.second()),
+            i32::from(ts.tz_hour_offset()) * 60
+                + i32::from(ts.tz_minute_offset()),
+        );
+        let expected = (
+            row.get::<i32>(1)?,
+            row.get::<i32>(2)?,
+            row.get::<i32>(3)?,
+            row.get::<i32>(4)?,
+            row.get::<i32>(5)?,
+            row.get::<i32>(6)?,
+            row.get::<i32>(7)?,
+        );
+        assert_eq!(fetched, expected, "{value}");
+    }
+    let row = conn.query_row(
+        "select timestamp '2026-10-22 13:05:06 +02:00' from dual",
+        &[],
+    )?;
+    let ts: oracledb::OracleTimestamp = row.get(0)?;
+    assert_eq!(
+        ts,
+        oracledb::OracleTimestamp::new_timestamp_tz(
+            2026, 10, 22, 13, 5, 6, 0, 2, 0
+        )
+    );
+    Ok(())
+}
+
+#[test]
+/// Verifies the display of negative time zone offsets.
+fn test_1211() {
+    let new_timestamp_tz = oracledb::OracleTimestamp::new_timestamp_tz;
+    assert_eq!(
+        new_timestamp_tz(2026, 3, 1, 0, 15, 0, 0, -3, -30).to_string(),
+        "2026-03-01T00:15:00.000000000-03:30"
+    );
+    assert_eq!(
+        new_timestamp_tz(2026, 3, 1, 0, 15, 0, 0, 0, -30).to_string(),
+        "2026-03-01T00:15:00.000000000-00:30"
+    );
+    assert_eq!(
+        new_timestamp_tz(2026, 3, 1, 0, 15, 0, 0, -6, 0).to_string(),
+        "2026-03-01T00:15:00.000000000-06:00"
+    );
 }
