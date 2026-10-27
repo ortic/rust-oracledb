@@ -37,6 +37,7 @@ use super::connect_string_parser;
 use super::defaults;
 
 use crate::error::Error;
+use crate::nne::NativeNetworkEncryption;
 use crate::secret_value::SecretValue;
 
 /// Represents configuration used to establish a standalone connection to the
@@ -59,6 +60,7 @@ pub struct Config {
     wallet_location: Option<String>,
     wallet_password: Option<SecretValue>,
     transport_connect_timeout: Option<Duration>,
+    native_network_encryption: NativeNetworkEncryption,
 }
 
 impl Config {
@@ -130,6 +132,12 @@ impl Config {
             .unwrap_or(defaults::default_machine())
     }
 
+    /// Returns whether connections use Native Network Encryption and Data
+    /// Integrity.
+    pub fn native_network_encryption(&self) -> NativeNetworkEncryption {
+        self.native_network_encryption
+    }
+
     /// Returns the name of the OS user in use by the configuration. The
     /// default value is the name of the OS user running the program.
     pub fn osuser(&self) -> &str {
@@ -199,6 +207,18 @@ impl Config {
         connect_string_parser::validate_network_name(&machine)?;
         self.machine = Some(machine);
         Ok(self)
+    }
+
+    /// Sets whether connections use Native Network Encryption and Data
+    /// Integrity; see [NativeNetworkEncryption] for the levels. The default
+    /// is Rejected; Accepted, the default of Oracle's client libraries,
+    /// connects to databases that require it too.
+    pub fn set_native_network_encryption(
+        mut self,
+        value: NativeNetworkEncryption,
+    ) -> Self {
+        self.native_network_encryption = value;
+        self
     }
 
     /// Sets the new password to use when connecting to the database.
@@ -358,6 +378,7 @@ impl Default for Config {
             wallet_location: None,
             wallet_password: None,
             transport_connect_timeout: None,
+            native_network_encryption: NativeNetworkEncryption::default(),
         }
     }
 }

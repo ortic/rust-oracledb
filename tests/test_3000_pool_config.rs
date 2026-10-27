@@ -38,6 +38,10 @@ fn test_3000() {
     assert_eq!(config.ping_interval(), Some(Duration::from_secs(60)));
     assert_eq!(config.ping_timeout(), Duration::from_secs(5));
     assert_eq!(config.stmtcachesize(), 20);
+    assert_eq!(
+        config.native_network_encryption(),
+        oracledb::NativeNetworkEncryption::Rejected
+    );
 
     let config = oracledb::PoolConfig::default()
         .set_min_connections(2)
@@ -45,13 +49,20 @@ fn test_3000() {
         .set_connection_increment(3)
         .set_ping_interval(None)
         .set_ping_timeout(Duration::ZERO)
-        .set_stmtcachesize(0);
+        .set_stmtcachesize(0)
+        .set_native_network_encryption(
+            oracledb::NativeNetworkEncryption::Accepted,
+        );
     assert_eq!(config.min_connections(), 2);
     assert_eq!(config.max_connections(), 7);
     assert_eq!(config.connection_increment(), 3);
     assert_eq!(config.ping_interval(), None);
     assert_eq!(config.ping_timeout(), Duration::ZERO);
     assert_eq!(config.stmtcachesize(), 0);
+    assert_eq!(
+        config.native_network_encryption(),
+        oracledb::NativeNetworkEncryption::Accepted
+    );
 }
 
 #[test]

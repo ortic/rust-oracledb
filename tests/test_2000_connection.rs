@@ -489,3 +489,44 @@ fn test_2015() -> Result<(), oracledb::Error> {
     }
     Ok(())
 }
+
+#[test]
+/// Tests that with Native Network Encryption required, the connection is
+/// encrypted and checksummed, also after an error resets it (needs a database
+/// that doesn't reject it; not over TLS).
+fn test_2016() -> Result<(), oracledb::Error> {
+    let test_config = oracledb::get_test_config();
+    if test_config.connect_string.starts_with("tcps://") {
+        common::skip_test("Native Network Encryption isn't used over TLS");
+        return Ok(());
+    }
+    let config = test_config.config.clone().set_native_network_encryption(
+        oracledb::NativeNetworkEncryption::Required,
+    );
+    let conn = oracledb::connect(config)?;
+    let mut banners = Vec::new();
+    let sql = "select network_service_banner from v$session_connect_info
+               where sid = sys_context('userenv', 'sid')";
+    for row in conn.query(sql, &[])? {
+        banners.push(row?.get::<String>(0)?);
+    }
+    for adapter in [
+        "Encryption service adapter",
+        "Crypto-checksumming service adapter",
+    ] {
+        assert!(
+            banners.iter().any(|b| b.contains(adapter)),
+            "no {adapter} in {banners:?}"
+        );
+    }
+    let error = match conn.execute("select * from table_2016_missing", &[]) {
+        Ok(_) => panic!("a missing table must fail"),
+        Err(error) => error,
+    };
+    assert!(matches!(error.kind(), oracledb::ErrorKind::DbError(_)));
+    let sql = "select sum(length(rpad('x', 4000, 'x'))) from dual
+               connect by level <= 1000";
+    let row = conn.query_row(sql, &[])?;
+    assert_eq!(row.get::<i64>(0)?, 4_000_000);
+    Ok(())
+}

@@ -92,3 +92,17 @@ jobs:
         env:
           RSO_TEST_CONNECT_STRING: tcps://localhost:2484/FREEPDB1
           RSO_TEST_WALLET_LOCATION: ${{ runner.temp }}/wallet
+      # The suite again over Native Network Encryption, which the database
+      # then requires, of clients that don't use weak algorithms
+      # (sqlnet.ora is read for each connection).
+      - name: Require Native Network Encryption
+        run: |
+          docker exec -i ${{ job.services.oracle.id }} bash -c 'cat >> "$ORACLE_HOME/network/admin/sqlnet.ora"' <<'EOF'
+          SQLNET.ALLOW_WEAK_CRYPTO_CLIENTS = FALSE
+          SQLNET.ENCRYPTION_SERVER = REQUIRED
+          SQLNET.CRYPTO_CHECKSUM_SERVER = REQUIRED
+          EOF
+      - name: Test over Native Network Encryption
+        run: cargo test --all-features --no-fail-fast
+        env:
+          RSO_TEST_NATIVE_NETWORK_ENCRYPTION: accepted

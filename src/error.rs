@@ -71,6 +71,7 @@ pub enum ErrorKind {
     LockPoisoned,
     MissingBindValue(String),
     NameHasEmbeddedQuotes,
+    NetworkSecurity(String),
     NoConfigDir,
     NoConnectString,
     NoCredentials,
@@ -337,6 +338,9 @@ impl fmt::Display for Error {
             }
             ErrorKind::NoCredentials => {
                 fmt.write_str("no credentials specified")?
+            }
+            ErrorKind::NetworkSecurity(reason) => {
+                write!(fmt, "native network encryption: {}", reason)?
             }
             ErrorKind::NoDataFound => fmt.write_str("no data found")?,
             ErrorKind::NotConnected => {
@@ -675,6 +679,10 @@ impl Error {
 
     pub(crate) fn name_has_embedded_quotes() -> Error {
         Error::new(ErrorKind::NameHasEmbeddedQuotes, None)
+    }
+
+    pub(crate) fn network_security(reason: impl Into<String>) -> Error {
+        Error::new(ErrorKind::NetworkSecurity(reason.into()), None)
     }
 
     pub(crate) fn no_config_dir() -> Error {

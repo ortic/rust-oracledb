@@ -43,7 +43,9 @@ use crate::write_buffer::WriteBuffer;
 const GSO_DONT_CARE: u16 = 0x0001;
 
 // NSI constants
+const NSI_NA_WANTED: u8 = 0x01;
 const NSI_DISABLE_NA: u8 = 0x04;
+const NSI_NA_NO_SERVICES: u8 = 0x08;
 const NSI_NA_REQUIRED: u8 = 0x10;
 const NSI_SUPPORT_SECURITY_RENEG: u8 = 0x80;
 
@@ -63,6 +65,10 @@ pub struct ConnectMessage<'a> {
     pub tls_renegotiation_needed: bool,
     pub redirect_data: Option<String>,
     pub redirect_data_len: u16,
+    /// Whether to offer Native Network Encryption and Data Integrity.
+    offer_network_security: bool,
+    /// Whether the advanced negotiation follows the accept packet.
+    pub advanced_negotiation: bool,
 }
 
 impl ConnectMessage<'_> {
@@ -70,6 +76,7 @@ impl ConnectMessage<'_> {
         connect_data: &'a str,
         address: &'a Address,
         description: &'a Description,
+        offer_network_security: bool,
     ) -> ConnectMessage<'a> {
         ConnectMessage {
             connect_data,
@@ -83,6 +90,8 @@ impl ConnectMessage<'_> {
             tls_renegotiation_needed: false,
             redirect_data: None,
             redirect_data_len: 0,
+            offer_network_security,
+            advanced_negotiation: false,
         }
     }
 
@@ -96,13 +105,17 @@ impl ConnectMessage<'_> {
         }
         resp.advance(12)?;
         let flags1: u8 = resp.read_u8()?;
-        if flags1 & NSI_NA_REQUIRED != 0 {
-            return Err(Error::not_implemented(
-                "Native Network Encryption and Data Integrity (use TLS instead)"
-                    .to_string(),
+        let flags2: u8 = resp.read_u8()?;
+        self.advanced_negotiation = flags1 & NSI_NA_WANTED != 0
+            && flags1 & NSI_DISABLE_NA == 0
+            && flags2 & NSI_NA_NO_SERVICES == 0;
+        if !self.advanced_negotiation && flags1 & NSI_NA_REQUIRED != 0 {
+            return Err(Error::network_security(
+                "the server requires it, see \
+                 Config::set_native_network_encryption()",
             ));
         }
-        resp.advance(9)?;
+        resp.advance(8)?;
         self.sdu = resp.read_u32be()?;
         if self.protocol_version >= constants::PROTOCOL_VERSION_18 {
             resp.advance(5)?;
@@ -218,7 +231,11 @@ impl Message for ConnectMessage<'_> {
                 self.sdu.try_into().unwrap()
             }
         };
-        let nsi_flags = NSI_SUPPORT_SECURITY_RENEG | NSI_DISABLE_NA;
+        let nsi_flags = if self.offer_network_security {
+            NSI_SUPPORT_SECURITY_RENEG | NSI_NA_WANTED
+        } else {
+            NSI_SUPPORT_SECURITY_RENEG | NSI_DISABLE_NA
+        };
         buf.write_u16be(constants::PROTOCOL_VERSION_23);
         buf.write_u16be(constants::PROTOCOL_VERSION_MIN);
         buf.write_u16be(GSO_DONT_CARE);

@@ -29,7 +29,7 @@ second column displays whether it is supported in rust-oracledb.
 | Oracle Cloud Database connectivity                              | Yes                  |
 | Real Application Clusters (RAC)                                 | Yes                  |
 | Oracle Globally Distributed Database                            | No                   |
-| Native Network Encryption (NNE)                                 | No - use TLS instead |
+| Native Network Encryption (NNE)                                 | Yes - AES and SHA-2  |
 | `tnsnames.ora` file                                             | Yes                  |
 | `sqlnet.ora` file                                               | Not applicable       |
 | `oraaccess.xml`                                                 | Not applicable       |

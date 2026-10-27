@@ -41,7 +41,10 @@ fn pool_config(
         .set_connect_string(&test_config.connect_string)?
         .set_min_connections(min_connections)
         .set_max_connections(max_connections)
-        .set_connection_increment(connection_increment);
+        .set_connection_increment(connection_increment)
+        .set_native_network_encryption(
+            test_config.config.native_network_encryption(),
+        );
     Ok(match test_config.config.wallet_location() {
         Some(location) => config.set_wallet_location(location),
         None => config,

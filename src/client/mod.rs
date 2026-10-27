@@ -47,6 +47,8 @@ use crate::db_info::DbInfo;
 use crate::dbobject::DbObjectTypeCache;
 use crate::end_user_security_context::EndUserSecurityContext;
 use crate::error::Error;
+use crate::messages::AnoKeyMessage;
+use crate::messages::AnoMessage;
 use crate::messages::AuthMessage;
 use crate::messages::ConnectMessage;
 use crate::messages::DataTypesMessage;
@@ -61,6 +63,9 @@ use crate::messages::Message;
 use crate::messages::PingMessage;
 use crate::messages::ProtocolMessage;
 use crate::messages::RollbackMessage;
+use crate::nne;
+use crate::nne::NativeNetworkEncryption;
+use crate::nne::NetworkSecurity;
 use crate::packet::Packet;
 use crate::response::Response;
 use crate::row::DbRow;
@@ -687,8 +692,15 @@ impl Client {
             .set_max_packet_size(description.sdu() as usize);
         let mut address = address.clone();
         let mut connect_data = connect_data.to_string();
-        let mut connect_message =
-            ConnectMessage::new(&connect_data, &address, description);
+        let nne_level = self.config.native_network_encryption();
+        let offer_network_security =
+            nne_level != NativeNetworkEncryption::Rejected;
+        let mut connect_message = ConnectMessage::new(
+            &connect_data,
+            &address,
+            description,
+            offer_network_security && address.protocol() != "tcps",
+        );
         while !connect_message.accepted {
             self.process_message(&mut connect_message)?;
             if connect_message.redirect_data_len > 0 {
@@ -713,6 +725,7 @@ impl Client {
                         &connect_data,
                         &address,
                         description,
+                        offer_network_security && address.protocol() != "tcps",
                     );
                     connect_message.packet_flags =
                         constants::PACKET_FLAGS_REDIRECT;
@@ -733,6 +746,47 @@ impl Client {
             connect_message.protocol_flags,
         );
         self.transport.set_full_packet_size();
+        if connect_message.advanced_negotiation {
+            self.negotiate_network_security(nne_level)?;
+        } else if nne_level == NativeNetworkEncryption::Required
+            && !self.transport.uses_tls()
+        {
+            return Err(Error::network_security(
+                "the server doesn't offer it",
+            ));
+        }
+        Ok(())
+    }
+
+    /// Performs the advanced negotiation, which follows the accept packet
+    /// when the server wants Native Network Encryption or Data Integrity, and
+    /// starts the algorithms the server chose. The server doesn't mark the
+    /// end of its response.
+    fn negotiate_network_security(
+        &mut self,
+        level: NativeNetworkEncryption,
+    ) -> Result<(), Error> {
+        let orig_value = self.caps.set_supports_end_of_response(false);
+        let mut message = AnoMessage::new(level);
+        let result = self.process_message(&mut message);
+        self.caps.set_supports_end_of_response(orig_value);
+        result?;
+        if let Some(public_key) = message.public_key.as_deref() {
+            self.send_message(&mut AnoKeyMessage { public_key })?;
+        }
+        let encrypted = message.encryption_algorithm != nne::ENCRYPTION_NONE;
+        let checksummed = message.integrity_algorithm != nne::INTEGRITY_NONE;
+        if level == NativeNetworkEncryption::Required
+            && !(encrypted && checksummed)
+        {
+            return Err(Error::network_security(
+                "the server didn't agree to both encryption and integrity",
+            ));
+        }
+        if let Some(negotiated) = message.negotiated()? {
+            let security = NetworkSecurity::new(negotiated)?;
+            self.transport.start_network_security(security);
+        }
         Ok(())
     }
 
@@ -971,6 +1025,9 @@ impl Client {
     ) -> Result<DbInfo, Error> {
         let db_info = DbInfo::new(self, auth_message);
         self.combo_key = auth_message.take_combo_key();
+        if let Some(combo_key) = self.combo_key.as_ref() {
+            self.transport.fold_in_key(combo_key)?;
+        }
         let max_open_cursors = db_info.get_max_open_cursors();
         if max_open_cursors < self.statement_cache.max_size() {
             self.statement_cache.resize(max_open_cursors);

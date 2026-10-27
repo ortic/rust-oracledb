@@ -29,6 +29,7 @@
 // and the client.
 //-----------------------------------------------------------------------------
 
+mod ano;
 mod auth;
 mod commit;
 mod connect;
@@ -259,6 +260,7 @@ pub(crate) trait Message {
     }
 }
 
+pub(crate) use ano::{AnoKeyMessage, AnoMessage};
 pub(crate) use auth::AuthMessage;
 pub(crate) use commit::CommitMessage;
 pub(crate) use connect::ConnectMessage;

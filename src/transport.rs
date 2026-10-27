@@ -55,6 +55,7 @@ use crate::config::Address;
 use crate::config::Config;
 use crate::constants;
 use crate::error::Error;
+use crate::nne::NetworkSecurity;
 use crate::packet::Packet;
 
 enum LowLevelTransport {
@@ -295,6 +296,8 @@ pub(crate) struct Transport {
     full_packet_size: bool,
     print_packets: bool,
     op_num: usize,
+    /// Native Network Encryption and Data Integrity, once negotiated.
+    security: Option<NetworkSecurity>,
 }
 
 // a custom client certificate resolver is required because the client
@@ -372,13 +375,13 @@ impl Transport {
     /// Extracts a packet from the data that has been received from the
     /// database. If insufficient bytes have been read, None is returned which
     /// signals that the caller should wait for some more bytes to be received.
-    fn extract_packet(&mut self) -> Option<Packet> {
+    fn extract_packet(&mut self) -> Result<Option<Packet>, Error> {
         if self.residual_bytes <= 4 {
-            return None;
+            return Ok(None);
         }
         self.last_packet_bytes = self.get_packet_size();
         if self.residual_bytes < self.last_packet_bytes {
-            return None;
+            return Ok(None);
         }
         self.residual_bytes -= self.last_packet_bytes;
         let packet_buf = &self.read_buf[0..self.last_packet_bytes];
@@ -387,7 +390,19 @@ impl Transport {
             let header = self.get_op_header("Receiving packet");
             print_packet(&header, packet_buf);
         }
-        Some(Packet::new(packet_buf))
+        let mut packet = Packet::new(packet_buf);
+        if let Some(security) = self.security.as_mut() {
+            if packet.packet_type == constants::PACKET_TYPE_DATA {
+                security.unwrap(&mut packet.buf)?;
+                if self.print_packets {
+                    let header = self.get_op_header("Received payload");
+                    print_packet(&header, &packet.buf);
+                }
+            } else if packet.has_reset_marker() {
+                security.reset();
+            }
+        }
+        Ok(Some(packet))
     }
 
     /// Returns the op header used when displaying packet data.
@@ -466,6 +481,7 @@ impl Transport {
         stream.set_nodelay(true)?;
         stream.set_read_timeout(None)?;
         self.socket_num = get_socket_num(&stream);
+        self.security = None;
         self.low_level_transport = Some(LowLevelTransport::Tcp(stream));
         if address.protocol() == "tcps" {
             self.negotiate_tls(address.host(), wallet_location, config)?;
@@ -517,6 +533,7 @@ impl Transport {
             full_packet_size: false,
             print_packets: env::var_os("RSO_DEBUG_PACKETS").is_some(),
             op_num: 0,
+            security: None,
         }
     }
 
@@ -530,7 +547,7 @@ impl Transport {
             self.last_packet_bytes = 0;
         }
         loop {
-            if let Some(packet) = self.extract_packet() {
+            if let Some(packet) = self.extract_packet()? {
                 return Ok(packet);
             }
             let num_bytes = self.read_packet()?;
@@ -554,11 +571,29 @@ impl Transport {
         if packet_type == constants::PACKET_TYPE_DATA {
             header_size += 2;
         }
-        let max_data_size = self.max_packet_size - header_size;
+        let mut max_data_size = self.max_packet_size - header_size;
+        let secured = packet_type == constants::PACKET_TYPE_DATA
+            && self.security.is_some();
+        if secured && let Some(security) = self.security.as_ref() {
+            max_data_size = security.max_payload_size(max_data_size);
+        }
+        let mut wrapped = Vec::new();
         loop {
             let packet_data_size = min(max_data_size, data.len());
-            let packet_data = &data[..packet_data_size];
+            let mut packet_data = &data[..packet_data_size];
             data = &data[packet_data_size..];
+            if secured {
+                if self.print_packets {
+                    let header = self.get_op_header("Sending payload");
+                    print_packet(&header, packet_data);
+                }
+                wrapped.clear();
+                wrapped.extend_from_slice(packet_data);
+                if let Some(security) = self.security.as_mut() {
+                    security.wrap(&mut wrapped);
+                }
+                packet_data = &wrapped;
+            }
             let packet_size = packet_data.len() + header_size;
             self.write_buf.clear();
             if self.full_packet_size {
@@ -630,6 +665,24 @@ impl Transport {
     /// packets sent on the transport.
     pub(crate) fn set_full_packet_size(&mut self) {
         self.full_packet_size = true;
+    }
+
+    /// Starts Native Network Encryption and Data Integrity for all data
+    /// packets sent and received from now on.
+    pub(crate) fn start_network_security(
+        &mut self,
+        security: NetworkSecurity,
+    ) {
+        self.security = Some(security);
+    }
+
+    /// Folds the key the authentication agreed on into the keys of Native
+    /// Network Encryption and Data Integrity, if they are in use.
+    pub(crate) fn fold_in_key(&mut self, key: &[u8]) -> Result<(), Error> {
+        match self.security.as_mut() {
+            Some(security) => security.fold_in(key),
+            None => Ok(()),
+        }
     }
 
     /// Returns whether this transport is currently wrapped in TLS.

@@ -34,6 +34,7 @@ use std::time::Duration;
 use super::Config;
 
 use crate::error::Error;
+use crate::nne::NativeNetworkEncryption;
 
 /// Represents configuration used to create a connection pool using
 /// [create_pool()](`crate::create_pool`).
@@ -131,6 +132,12 @@ impl PoolConfig {
         self.min_connections.unwrap_or(1)
     }
 
+    /// Returns whether connections use Native Network Encryption and Data
+    /// Integrity.
+    pub fn native_network_encryption(&self) -> NativeNetworkEncryption {
+        self.connection_config.native_network_encryption()
+    }
+
     /// Returns the name of the OS user in use by the configuration. The
     /// default value is the name of the OS user running the program.
     pub fn osuser(&self) -> &str {
@@ -226,6 +233,19 @@ impl PoolConfig {
     /// should contain.
     pub fn set_min_connections(mut self, value: usize) -> Self {
         self.min_connections = Some(value);
+        self
+    }
+
+    /// Sets whether connections use Native Network Encryption and Data
+    /// Integrity; see [NativeNetworkEncryption] for the levels. The default
+    /// is Rejected; Accepted, the default of Oracle's client libraries,
+    /// connects to databases that require it too.
+    pub fn set_native_network_encryption(
+        mut self,
+        value: NativeNetworkEncryption,
+    ) -> Self {
+        self.connection_config =
+            self.connection_config.set_native_network_encryption(value);
         self
     }
 

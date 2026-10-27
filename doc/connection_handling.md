@@ -847,6 +847,31 @@ Rust-oracledb supports TLS connections when using TCPS-style connection strings
 or descriptors. For encrypted traffic, use TCPS/TLS configuration where
 supported.
 
+Databases can also encrypt and checksum traffic over plain TCP with Native
+Network Encryption (NNE) and Data Integrity, configured with
+`SQLNET.ENCRYPTION_SERVER` and `SQLNET.CRYPTO_CHECKSUM_SERVER` in the
+database's `sqlnet.ora`. A database that requires them refuses connections
+that don't use them, which by default rust-oracledb doesn't. The
+[Config::set_native_network_encryption()](crate::Config::set_native_network_encryption)
+method sets whether they are used, with the levels of the
+`SQLNET.ENCRYPTION_CLIENT` setting of Oracle's client libraries (see
+[NativeNetworkEncryption](crate::NativeNetworkEncryption)). Accepted, the
+default of Oracle's client libraries, uses them when the database requests or
+requires them:
+
+```rust
+let config = oracledb::Config::default()
+    .set_credentials("hr", "password")
+    .set_connect_string("dbhost.example.com/orclpdb")?
+    .set_native_network_encryption(oracledb::NativeNetworkEncryption::Accepted);
+```
+
+Encryption uses AES and integrity SHA-2, which the database must allow: older
+algorithms (DES, 3DES, RC4, MD5 and SHA-1) aren't supported. Both the current
+version of the algorithms and the older one of databases without it (such as
+Oracle Database 18c) are. Connections using TLS never use Native Network
+Encryption.
+
 See the [Oracle Database Security Guide][oracle-db-security-guide] for more
 configuration information.
 
