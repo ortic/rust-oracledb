@@ -48,7 +48,9 @@ chrono-tz = "0.10.4"
 pbkdf2 = "0.13.0"
 pkcs8 = { version = "0.11.0", features = ["pem", "encryption"] }
 rand = "0.10.2"
-rustls = "0.23.42"
+# ring, not the default aws-lc-rs: no C toolchain for aws-lc-sys, and one
+# provider with programs that use ring too (ortic/pythia#99, #104).
+rustls = { version = "0.23.42", default-features = false, features = ["ring", "std", "tls12", "logging"] }
 sha2 = "0.11.0"
 uuid = { version = "1.24.0", features = ["v4"] }
 webpki-roots = "1.0.8"
