@@ -161,12 +161,12 @@ impl CbcEncryptor {
     /// Encrypts the data in place; its length is a multiple of the block
     /// size.
     fn encrypt(&mut self, data: &mut [u8]) {
-        for block in data.chunks_exact_mut(BLOCK_SIZE) {
+        for block in data.as_chunks_mut::<BLOCK_SIZE>().0 {
             for (b, c) in block.iter_mut().zip(self.chain) {
                 *b ^= c;
             }
             self.aes.encrypt_block(block);
-            self.chain.copy_from_slice(block);
+            self.chain = *block;
         }
     }
 }
@@ -189,8 +189,8 @@ impl PacketCipher {
             return Err(Error::network_security("invalid encrypted length"));
         }
         let mut chain = self.iv;
-        for block in data.chunks_exact_mut(BLOCK_SIZE) {
-            let encrypted: [u8; BLOCK_SIZE] = (&*block).try_into().unwrap();
+        for block in data.as_chunks_mut::<BLOCK_SIZE>().0 {
+            let encrypted = *block;
             self.aes.decrypt_block(block);
             for (b, c) in block.iter_mut().zip(chain) {
                 *b ^= c;
@@ -205,12 +205,12 @@ impl PacketCipher {
         let pad_len = data.len().next_multiple_of(BLOCK_SIZE) - data.len();
         data.resize(data.len() + pad_len, 0);
         let mut chain = self.iv;
-        for block in data.chunks_exact_mut(BLOCK_SIZE) {
+        for block in data.as_chunks_mut::<BLOCK_SIZE>().0 {
             for (b, c) in block.iter_mut().zip(chain) {
                 *b ^= c;
             }
             self.aes.encrypt_block(block);
-            chain.copy_from_slice(block);
+            chain = *block;
         }
         data.push(pad_len as u8 + 1);
     }
