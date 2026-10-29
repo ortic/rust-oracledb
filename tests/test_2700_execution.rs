@@ -804,13 +804,10 @@ fn test_2728(conn: oracledb::Connection) -> Result<(), oracledb::Error> {
 
     // Many rows, every third one failing.
     conn.execute("truncate table test_2728", &[])?;
-    let ids: Vec<i32> = (0..3000)
-        .map(|i| if i % 3 == 2 { 0 } else { i + 1 })
-        .collect();
-    let values: Vec<[&dyn oracledb::ToDbValue; 2]> = ids
-        .iter()
-        .map(|id| [id as &dyn oracledb::ToDbValue, &"x"])
-        .collect();
+    let ids: Vec<i32> =
+        (0..3000).map(|i| if i % 3 == 2 { 0 } else { i + 1 }).collect();
+    let values: Vec<[&dyn oracledb::ToDbValue; 2]> =
+        ids.iter().map(|id| [id as &dyn oracledb::ToDbValue, &"x"]).collect();
     let rows: Vec<&[&dyn oracledb::ToDbValue]> =
         values.iter().map(|r| r.as_slice()).collect();
     let mut stmt = conn.statement(sql)?.batch_errors().build()?;

@@ -491,11 +491,7 @@ impl NetworkSecurity {
         if let Some(cipher) = &self.cipher {
             cipher.encrypt(data);
         }
-        data.push(if self.keys_folded {
-            KEYS_FOLDED
-        } else {
-            KEYS_UNFOLDED
-        });
+        data.push(if self.keys_folded { KEYS_FOLDED } else { KEYS_UNFOLDED });
     }
 }
 
@@ -509,12 +505,8 @@ mod tests {
         ENCRYPTION_AES192,
         ENCRYPTION_AES256,
     ];
-    const INTEGRITY_ALGORITHMS: [u8; 4] = [
-        INTEGRITY_NONE,
-        INTEGRITY_SHA256,
-        INTEGRITY_SHA384,
-        INTEGRITY_SHA512,
-    ];
+    const INTEGRITY_ALGORITHMS: [u8; 4] =
+        [INTEGRITY_NONE, INTEGRITY_SHA256, INTEGRITY_SHA384, INTEGRITY_SHA512];
 
     fn session_key() -> Vec<u8> {
         (0..256).map(|i| (i * 7 + 3) as u8).collect()
@@ -559,10 +551,8 @@ mod tests {
 
     #[test]
     fn packet_cipher_round_trip() {
-        let cipher = PacketCipher {
-            aes: Aes::new(&[1; 32]),
-            iv: [2; BLOCK_SIZE],
-        };
+        let cipher =
+            PacketCipher { aes: Aes::new(&[1; 32]), iv: [2; BLOCK_SIZE] };
         for len in 0..=3 * BLOCK_SIZE {
             let data: Vec<u8> = (0..len as u8).collect();
             let mut encrypted = data.clone();

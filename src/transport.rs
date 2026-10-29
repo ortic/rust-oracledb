@@ -100,9 +100,7 @@ impl InterruptWriter {
 fn lock_session(
     session: &Mutex<TlsClientConnection>,
 ) -> io::Result<MutexGuard<'_, TlsClientConnection>> {
-    session
-        .lock()
-        .map_err(|_| io::Error::other("TLS session lock poisoned"))
+    session.lock().map_err(|_| io::Error::other("TLS session lock poisoned"))
 }
 
 /// Sends what the session has to send: data written to it, alerts, key
@@ -139,10 +137,7 @@ impl TlsTransport {
     }
 
     fn interrupt_writer(&self) -> io::Result<InterruptWriter> {
-        Ok(InterruptWriter::Tls(
-            self.session.clone(),
-            self.sock.try_clone()?,
-        ))
+        Ok(InterruptWriter::Tls(self.session.clone(), self.sock.try_clone()?))
     }
 
     fn read(&mut self, buf: &mut [u8]) -> io::Result<usize> {

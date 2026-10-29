@@ -507,10 +507,9 @@ fn test_2016() -> Result<(), oracledb::Error> {
     for row in conn.query(sql, &[])? {
         banners.push(row?.get::<String>(0)?);
     }
-    for adapter in [
-        "Encryption service adapter",
-        "Crypto-checksumming service adapter",
-    ] {
+    for adapter in
+        ["Encryption service adapter", "Crypto-checksumming service adapter"]
+    {
         assert!(
             banners.iter().any(|b| b.contains(adapter)),
             "no {adapter} in {banners:?}"

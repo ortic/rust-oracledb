@@ -76,16 +76,10 @@ const AUTH_STATUS_REQUEST: u16 = 0xFCFF;
 const AUTH_STATUS_NOT_ACTIVE: u16 = 0xFBFF;
 
 // the algorithms supported, most preferred first
-const ENCRYPTION_ALGORITHMS: [u8; 3] = [
-    nne::ENCRYPTION_AES256,
-    nne::ENCRYPTION_AES192,
-    nne::ENCRYPTION_AES128,
-];
-const INTEGRITY_ALGORITHMS: [u8; 3] = [
-    nne::INTEGRITY_SHA512,
-    nne::INTEGRITY_SHA384,
-    nne::INTEGRITY_SHA256,
-];
+const ENCRYPTION_ALGORITHMS: [u8; 3] =
+    [nne::ENCRYPTION_AES256, nne::ENCRYPTION_AES192, nne::ENCRYPTION_AES128];
+const INTEGRITY_ALGORITHMS: [u8; 3] =
+    [nne::INTEGRITY_SHA512, nne::INTEGRITY_SHA384, nne::INTEGRITY_SHA256];
 
 // not using the service, the same id for both services
 const ALGORITHM_NONE: u8 = 0;
