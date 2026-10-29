@@ -91,13 +91,7 @@ impl ErrorInfo {
         // With batch errors, the rows' errors are in batch_errors instead.
         .filter(|e| e.code != constants::DB_ERR_NUM_ARRAY_DML_ERRORS);
 
-        Ok(ErrorInfo {
-            cursor_id,
-            flags,
-            rowcount,
-            db_error,
-            batch_errors,
-        })
+        Ok(ErrorInfo { cursor_id, flags, rowcount, db_error, batch_errors })
     }
 
     /// Deserializes the errors of a batch's rows (with batch errors on): an

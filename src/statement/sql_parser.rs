@@ -168,7 +168,12 @@ impl SqlParser<'_> {
     /// leading dashes have been found and all remaining characters up to the
     /// end of the current line are discarded.
     fn parse_single_line_comment(&mut self) {
-        self.parser.skip_to_end_of_line();
+        while let Some(ch) = self.parser.peek_char() {
+            if ch == '\n' {
+                break;
+            }
+            self.parser.next_char();
+        }
     }
 
     /// Creates a new SQL parser for the given SQL.
@@ -227,8 +232,9 @@ impl SqlParser<'_> {
                 }
             } else if !ch.is_whitespace() {
                 if ch == '-' && last_ch == '-' {
-                    // This consumes the newline as well, so go on with the
-                    // first character of the next line.
+                    // This stops at the newline, which then counts as the
+                    // last character, so a '-' at the start of the next line
+                    // doesn't start another comment.
                     self.parse_single_line_comment();
                     last_was_string = false;
                     last_was_alpha = false;

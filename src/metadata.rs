@@ -293,11 +293,8 @@ impl Metadata {
         scale: i8,
     ) {
         self.db_type = db_type;
-        self.max_size = if max_size == 0 {
-            db_type.default_size
-        } else {
-            max_size
-        };
+        self.max_size =
+            if max_size == 0 { db_type.default_size } else { max_size };
         self.precision = precision;
         self.scale = scale;
     }
@@ -333,6 +330,7 @@ impl Metadata {
                     | constants::ORA_TYPE_NUM_BLOB
                     | constants::ORA_TYPE_NUM_BFILE
                     | constants::ORA_TYPE_NUM_CURSOR
+                    | constants::ORA_TYPE_NUM_OBJECT
             )
     }
 

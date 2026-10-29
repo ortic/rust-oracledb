@@ -33,6 +33,7 @@ use crate::client::ClientRef;
 use crate::constants;
 use crate::cursor::Cursor;
 use crate::db_type::DbType;
+use crate::dbobject::{DbCollection, DbObject, PendingDbObject};
 use crate::error::Error;
 use crate::json::JsonValue;
 use crate::lob::Lob;
@@ -60,6 +61,8 @@ pub enum DbValue {
     Boolean(bool),
     Bytes(Vec<u8>),
     Cursor(Box<Cursor>),
+    DbCollection(DbCollection),
+    DbObject(DbObject),
     IntervalDS(OracleIntervalDS),
     IntervalYM(OracleIntervalYM),
     Json(JsonValue),
@@ -71,21 +74,50 @@ pub enum DbValue {
     Lob(Lob),
 }
 
-/// Contains LOB and cursor data until a client reference can be added.
+/// Contains object, LOB and cursor data until finalization.
 pub(crate) enum PendingDbValue {
+    DbObject(PendingDbObject),
     Cursor(CachedStatement),
     Lob(PendingLobData),
 }
 
 impl PendingDbValue {
-    /// Converts pending data into a public value with a client reference.
-    pub(crate) fn into_db_value(self, client_ref: &ClientRef) -> DbValue {
+    /// Cleans up the pending database value. This is called when the pending
+    /// value will not be transformed into a public value.
+    pub(crate) fn cleanup(self, client: &mut Client) {
         match self {
-            PendingDbValue::Cursor(statement) => DbValue::Cursor(Box::new(
+            Self::DbObject(_) => {}
+            Self::Cursor(statement) => client.return_statement(&statement),
+            Self::Lob(mut data) => {
+                client.add_lob_to_close(data.take_locator())
+            }
+        }
+    }
+
+    /// Converts pending data into a public value with a client reference.
+    pub(crate) fn try_into_db_value(
+        self,
+        client: &Client,
+        client_ref: &ClientRef,
+        metadata: &Metadata,
+    ) -> Result<DbValue, Error> {
+        match self {
+            Self::DbObject(pending_obj) => {
+                if let Some(object_type) = metadata.object_type()? {
+                    pending_obj.try_into_db_value(
+                        &object_type,
+                        client,
+                        client_ref,
+                    )
+                } else {
+                    Err(Error::unsupported_db_type(metadata.db_type()))
+                }
+            }
+            Self::Cursor(statement) => Ok(DbValue::Cursor(Box::new(
                 Cursor::new(Statement::new(client_ref.clone(), statement)),
-            )),
-            PendingDbValue::Lob(data) => {
-                DbValue::Lob(Lob::new(client_ref.clone(), data))
+            ))),
+            Self::Lob(data) => {
+                Ok(DbValue::Lob(Lob::new(client_ref.clone(), data)))
             }
         }
     }
@@ -203,6 +235,13 @@ impl DbValue {
                 )));
                 Ok(None)
             }
+            constants::ORA_TYPE_NUM_OBJECT => {
+                let object = PendingDbObject::from_response(resp)?;
+                resp.add_pending_db_value(
+                    object.map(PendingDbValue::DbObject),
+                );
+                Ok(None)
+            }
             _ => Err(Error::unsupported_db_type(db_type)),
         }?;
         if !in_fetch {
@@ -248,7 +287,6 @@ impl DbValue {
             let last_row = resp.get_last_row_fetched();
             return Ok(last_row.clone_column(column_num));
         }
-
         if metadata.is_array() {
             DbValue::array_from_response(
                 resp,
@@ -276,6 +314,8 @@ impl DbValue {
             DbValue::Boolean(_) => "boolean",
             DbValue::Bytes(_) => "raw",
             DbValue::Cursor(_) => "cursor",
+            DbValue::DbCollection(_) => "database collection",
+            DbValue::DbObject(_) => "database object",
             DbValue::IntervalDS(_) => "interval day to second",
             DbValue::IntervalYM(_) => "interval year to month",
             DbValue::Json(_) => "json",
@@ -453,6 +493,10 @@ impl<'a> FromDbValue<'a> for String {
             ColumnData::Owned(Some(DbValue::String(v))) => Ok(v),
             ColumnData::Borrowed(Some(DbValue::Rowid(v))) => Ok(v.to_string()),
             ColumnData::Owned(Some(DbValue::Rowid(v))) => Ok(v.to_string()),
+            ColumnData::Borrowed(Some(DbValue::Number(v))) => {
+                Ok(v.to_string())
+            }
+            ColumnData::Owned(Some(DbValue::Number(v))) => Ok(v.to_string()),
             _ => Err(Self::unsupported_conversion(column_data)),
         }
     }
@@ -694,11 +738,7 @@ where
     }
 
     fn max_size(&self) -> usize {
-        if let Some(value) = self {
-            <T>::max_size(value)
-        } else {
-            0
-        }
+        if let Some(value) = self { <T>::max_size(value) } else { 0 }
     }
 }
 

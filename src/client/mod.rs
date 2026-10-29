@@ -50,6 +50,7 @@ use crate::error::Error;
 use crate::messages::AnoKeyMessage;
 use crate::messages::AnoMessage;
 use crate::messages::AuthMessage;
+use crate::messages::CommitMessage;
 use crate::messages::ConnectMessage;
 use crate::messages::DataTypesMessage;
 use crate::messages::EofMessage;
@@ -57,6 +58,7 @@ use crate::messages::ExecuteMessage;
 use crate::messages::FastAuthMessage;
 use crate::messages::FetchMessage;
 use crate::messages::FlushOutBindsMessage;
+use crate::messages::LobOpMessage;
 use crate::messages::LogoffMessage;
 use crate::messages::MarkerMessage;
 use crate::messages::Message;
@@ -151,6 +153,20 @@ impl Client {
     /// Processes the call status flags returned by the server.
     fn process_call_status(&mut self, call_status: u32) {
         self.transaction_in_progress = call_status & 0x00000002 != 0
+    }
+
+    /// Processes a single message and receives back the response. If the
+    /// message requires resending, that is done and only the second response
+    /// is returned.
+    fn process_message(
+        &mut self,
+        message: &mut impl Message,
+    ) -> Result<Response, Error> {
+        let mut response = self.perform_round_trip(message)?;
+        if message.resend_needed() {
+            response = self.perform_round_trip(message)?;
+        }
+        Ok(response)
     }
 
     /// Receives a data packet from the database. Control packets and marker
@@ -294,7 +310,9 @@ impl Client {
         message: &mut impl Message,
     ) -> Result<(), Error> {
         let mut buf = WriteBuffer::new();
-        self.write_piggybacks(&mut buf);
+        if message.get_packet_type() == constants::PACKET_TYPE_DATA {
+            self.write_piggybacks(&mut buf);
+        }
         message.serialize(self, &mut buf);
         let breaker = self.breaker.clone();
         let _writing = breaker.writing()?;
@@ -638,6 +656,12 @@ impl Client {
         statement.clear_cursor();
     }
 
+    /// Commits any pending transaction.
+    pub(crate) fn commit(&mut self) -> Result<(), Error> {
+        self.process_message(&mut CommitMessage::new())?;
+        Ok(())
+    }
+
     /// Returns the configuration associated with the client.
     pub(crate) fn config(&self) -> &Config {
         &self.config
@@ -688,8 +712,7 @@ impl Client {
             wallet_location.as_deref(),
             &self.config,
         )?;
-        self.transport
-            .set_max_packet_size(description.sdu() as usize);
+        self.transport.set_max_packet_size(description.sdu() as usize);
         let mut address = address.clone();
         let mut connect_data = connect_data.to_string();
         let nne_level = self.config.native_network_encryption();
@@ -799,7 +822,9 @@ impl Client {
             self.override_ttc_field_version =
                 constants::FAST_AUTH_TTC_FIELD_VERSION;
             self.process_message(&mut fast_auth_message)?;
-            fast_auth_message.process_auth_phase_two(self)
+            let auth_message = fast_auth_message.auth_message();
+            self.process_message(auth_message)?;
+            self.post_connect(auth_message)
 
         // otherwise, do the normal authentication; disable end of response
         // for the first two messages as the server does not send an end of
@@ -824,15 +849,15 @@ impl Client {
         self.security_context = None;
         self.last_warning = None;
         self.transport.set_read_timeout(None)?;
-        if self.in_request {
-            if self.pending_session_state != 0 {
-                self.in_request = false;
-            } else {
-                self.pending_session_state =
-                    constants::TTC_SESSION_STATE_REQUEST_END;
-            }
+        if self.in_request && self.pending_session_state != 0 {
+            self.in_request = false;
         }
         if self.in_request || self.transaction_in_progress {
+            if self.in_request {
+                self.pending_session_state =
+                    constants::TTC_SESSION_STATE_REQUEST_END;
+                self.in_request = false;
+            }
             self.process_message(&mut RollbackMessage::new())?;
         }
         Ok(())
@@ -869,10 +894,7 @@ impl Client {
             let mut message =
                 ExecuteMessage::new(statement, params, parse_only);
             let mut response = self.process_message(&mut message)?;
-            response
-                .resolve_object_types(self, client_ref, Some(statement))
-                .inspect_err(|_| response.cleanup_pending_values(self))?;
-            response.finalize_rows(client_ref, statement.out_metadata());
+            response.complete_values(self, client_ref, statement)?;
             if statement.requires_define() {
                 statement.clear_requires_define();
             }
@@ -889,10 +911,7 @@ impl Client {
     ) -> Result<Response, Error> {
         let mut message = FetchMessage::new(statement, last_row);
         let mut response = self.process_message(&mut message)?;
-        response
-            .resolve_object_types(self, client_ref, None)
-            .inspect_err(|_| response.cleanup_pending_values(self))?;
-        response.finalize_rows(client_ref, statement.out_metadata());
+        response.complete_values(self, client_ref, statement)?;
         Ok(response)
     }
 
@@ -940,6 +959,11 @@ impl Client {
     /// Returns the database character set id used for NCHAR data.
     pub(crate) fn get_ncharset_id(&self) -> u16 {
         self.ncharset_id
+    }
+
+    /// Returns the database character set used by object images.
+    pub(crate) fn get_charset_id(&self) -> u16 {
+        self.charset_id
     }
 
     /// Returns the runtime capabilities.
@@ -1017,6 +1041,12 @@ impl Client {
         }
     }
 
+    /// Commits any pending transaction.
+    pub(crate) fn ping(&mut self) -> Result<(), Error> {
+        self.process_message(&mut PingMessage::new())?;
+        Ok(())
+    }
+
     /// Runs activities after the auth message has been processed. The auth
     /// message contains information about the database which is retained.
     pub(crate) fn post_connect(
@@ -1048,18 +1078,13 @@ impl Client {
         Ok(db_info)
     }
 
-    /// Processes a single message and receives back the response. If the
-    /// message requires resending, that is done and only the second response
-    /// is returned.
-    pub(crate) fn process_message(
+    /// Processes a LOB operation.
+    pub(crate) fn process_lob_op(
         &mut self,
-        message: &mut impl Message,
-    ) -> Result<Response, Error> {
-        let mut response = self.perform_round_trip(message)?;
-        if message.resend_needed() {
-            response = self.perform_round_trip(message)?;
-        }
-        Ok(response)
+        message: &mut LobOpMessage,
+    ) -> Result<(), Error> {
+        self.process_message(message)?;
+        Ok(())
     }
 
     /// Returns whether the client should be closed based on the pending error
@@ -1073,6 +1098,12 @@ impl Client {
     /// authentication.
     pub(crate) fn reset_ttc_field_version(&mut self) {
         self.override_ttc_field_version = 0;
+    }
+
+    /// Rolls back any pending transaction.
+    pub(crate) fn rollback(&mut self) -> Result<(), Error> {
+        self.process_message(&mut RollbackMessage::new())?;
+        Ok(())
     }
 
     /// Returns a statement to the statement cache for subsequent use, or

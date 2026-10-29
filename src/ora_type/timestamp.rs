@@ -33,6 +33,9 @@ use chrono::Timelike;
 use std::fmt;
 use std::fmt::Write;
 
+#[cfg(feature = "arrow")]
+use arrow_schema::TimeUnit;
+
 use super::tz_regions;
 use crate::constants;
 use crate::db_type::DbType;
@@ -52,6 +55,9 @@ pub struct OracleTimestamp {
     minute: u8,
     second: u8,
     nanoseconds: u32,
+    /// Whether the value has a time zone, as TIMESTAMP WITH TIME ZONE values
+    /// do.
+    has_time_zone: bool,
     tz_hour_offset: i8,
     tz_minute_offset: i8,
     /// The id of the value's time zone region, 0 for an offset.
@@ -68,6 +74,7 @@ impl Default for OracleTimestamp {
             minute: 0,
             second: 0,
             nanoseconds: 0,
+            has_time_zone: true,
             tz_hour_offset: 0,
             tz_minute_offset: 0,
             tz_region_id: 0,
@@ -77,12 +84,22 @@ impl Default for OracleTimestamp {
 
 impl OracleTimestamp {
     #[cfg(feature = "arrow")]
-    /// Returns the timestamp as the number of microseconds since July 1, 1970
-    /// as is required by the Arrow data format.
-    pub(crate) fn to_timestamp_micros(self) -> Result<i64, Error> {
-        Ok(chrono::NaiveDateTime::try_from(self)?
-            .and_utc()
-            .timestamp_micros())
+    /// Returns the timestamp in the specified Arrow time unit.
+    pub(crate) fn to_timestamp(
+        self,
+        time_unit: TimeUnit,
+    ) -> Result<i64, Error> {
+        let timestamp = chrono::NaiveDateTime::try_from(self)?.and_utc();
+        match time_unit {
+            TimeUnit::Second => Ok(timestamp.timestamp()),
+            TimeUnit::Millisecond => Ok(timestamp.timestamp_millis()),
+            TimeUnit::Microsecond => Ok(timestamp.timestamp_micros()),
+            TimeUnit::Nanosecond => {
+                timestamp.timestamp_nanos_opt().ok_or_else(|| {
+                    Error::out_of_range("timestamp is outside Arrow range")
+                })
+            }
+        }
     }
 
     /// Returns the day of the timestamp.
@@ -90,9 +107,24 @@ impl OracleTimestamp {
         self.day
     }
 
+    /// Returns whether the timestamp has a time zone, as TIMESTAMP WITH TIME
+    /// ZONE values do. Without one, the offsets are zero and there's no
+    /// region.
+    pub fn has_time_zone(&self) -> bool {
+        self.has_time_zone
+    }
+
     /// Returns the hour of the timestamp.
     pub fn hour(&self) -> u8 {
         self.hour
+    }
+
+    /// Returns whether the timestamp is a UTC timestamp: one with a time zone,
+    /// a zero offset and no region.
+    pub fn is_utc(&self) -> bool {
+        self.has_time_zone
+            && self.tz_offset_minutes() == 0
+            && self.tz_region().is_none()
     }
 
     /// Returns the minute of the timestamp.
@@ -121,15 +153,14 @@ impl OracleTimestamp {
             minute: 0,
             second: 0,
             nanoseconds: 0,
+            has_time_zone: false,
             tz_hour_offset: 0,
             tz_minute_offset: 0,
             tz_region_id: 0,
         }
     }
 
-    /// Creates a new timestamp given the date and time. The time zone offsets
-    /// are set to zero (assumed UTC when interacting with timestamp with
-    /// time zone columns in the database.
+    /// Creates a new naive timestamp given the date and time.
     pub fn new_timestamp(
         year: i16,
         month: u8,
@@ -147,6 +178,7 @@ impl OracleTimestamp {
             minute,
             second,
             nanoseconds,
+            has_time_zone: false,
             tz_hour_offset: 0,
             tz_minute_offset: 0,
             tz_region_id: 0,
@@ -176,8 +208,34 @@ impl OracleTimestamp {
             minute,
             second,
             nanoseconds,
+            has_time_zone: true,
             tz_hour_offset,
             tz_minute_offset,
+            tz_region_id: 0,
+        }
+    }
+
+    /// Creates a new UTC timestamp given the date and time.
+    pub fn new_utc_timestamp(
+        year: i16,
+        month: u8,
+        day: u8,
+        hour: u8,
+        minute: u8,
+        second: u8,
+        nanoseconds: u32,
+    ) -> Self {
+        Self {
+            year,
+            month,
+            day,
+            hour,
+            minute,
+            second,
+            nanoseconds,
+            has_time_zone: true,
+            tz_hour_offset: 0,
+            tz_minute_offset: 0,
             tz_region_id: 0,
         }
     }
@@ -198,8 +256,9 @@ impl OracleTimestamp {
     }
 
     /// Returns the name of the time zone region of a TIMESTAMP WITH TIME ZONE
-    /// value (e.g. `Europe/Zurich`), or None if it has an offset. A region
-    /// this driver doesn't know (one newer than its table) comes back in UTC.
+    /// value (e.g. `Europe/Zurich`), or None if it has an offset or no time
+    /// zone. A region this driver doesn't know (one newer than its table)
+    /// comes back in UTC.
     pub fn tz_region(&self) -> Option<&'static str> {
         tz_regions::name(self.tz_region_id)
     }
@@ -292,6 +351,9 @@ impl fmt::Display for OracleTimestamp {
             self.second,
             self.nanoseconds
         )?;
+        if !self.has_time_zone {
+            return Ok(());
+        }
         let offset = self.tz_offset_minutes();
         let region = self.tz_region();
         if offset == 0 && region.is_none() {
@@ -308,23 +370,24 @@ impl fmt::Display for OracleTimestamp {
             offset.abs() % 60
         )?;
         // A region follows its offset in brackets, as in RFC 9557.
-        match region {
-            Some(region) => write!(f, "[{region}]"),
-            None => Ok(()),
+        if let Some(region) = region {
+            write!(f, "[{region}]")?;
         }
+        Ok(())
     }
 }
 
 impl FromBuf for OracleTimestamp {
     fn from_buf(buf: &[u8]) -> Self {
         let mut nanoseconds: u32 = 0;
-        let mut tz_hour_offset: i8 = 0;
-        let mut tz_minute_offset: i8 = 0;
         if buf.len() >= constants::ORA_TYPE_SIZE_TIMESTAMP {
             nanoseconds = u32::from_be_bytes(buf[7..11].try_into().unwrap());
         }
+        let has_time_zone = buf.len() == constants::ORA_TYPE_SIZE_TIMESTAMP_TZ;
+        let mut tz_hour_offset: i8 = 0;
+        let mut tz_minute_offset: i8 = 0;
         let mut tz_region_id = 0;
-        if buf.len() == constants::ORA_TYPE_SIZE_TIMESTAMP_TZ {
+        if has_time_zone {
             if buf[11] & 0x80 != 0 {
                 // A region id; its second byte is 0 for some regions.
                 tz_region_id =
@@ -344,6 +407,7 @@ impl FromBuf for OracleTimestamp {
             minute: buf[5] - 1,
             second: buf[6] - 1,
             nanoseconds,
+            has_time_zone,
             tz_hour_offset,
             tz_minute_offset,
             tz_region_id: 0,
@@ -403,6 +467,10 @@ impl ToBuf for OracleTimestamp {
         if actual_db_type != crate::DB_TYPE_DATE {
             buf.write_u32be(self.nanoseconds());
         }
+        if actual_db_type == crate::DB_TYPE_TIMESTAMP_TZ {
+            buf.write_u8(constants::TZ_HOUR_OFFSET);
+            buf.write_u8(constants::TZ_MINUTE_OFFSET);
+        }
     }
 }
 
@@ -416,6 +484,7 @@ impl From<chrono::NaiveDateTime> for OracleTimestamp {
             minute: value.minute() as u8,
             second: value.second() as u8,
             nanoseconds: value.nanosecond(),
+            has_time_zone: false,
             tz_hour_offset: 0,
             tz_minute_offset: 0,
             tz_region_id: 0,

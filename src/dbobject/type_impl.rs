@@ -94,28 +94,30 @@ pub(super) struct DbObjectTypeBody {
     pub(super) element: Option<Metadata>,
     pub(super) oid: Vec<u8>,
     pub(super) version: u16,
+    pub(super) collection_type: Option<u8>,
 }
 
 impl fmt::Debug for DbObjectType {
     /// Formats the identity without traversing nested metadata.
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        f.debug_struct("DbObjectType")
-            .field("fqn", &self.fqn())
-            .finish()
+        f.debug_struct("DbObjectType").field("fqn", &self.fqn()).finish()
     }
 }
 
 impl DbObjectType {
     /// Returns the body completed before the public handle is returned.
     fn body(&self) -> &DbObjectTypeBody {
-        self.body
-            .get()
-            .expect("get_type completes all reachable metadata")
+        self.body.get().expect("get_type completes all reachable metadata")
     }
 
     /// Reports whether discovery has populated this type's own metadata.
     pub(crate) fn is_fully_populated(&self) -> bool {
         self.body.get().is_some()
+    }
+
+    /// Returns the collection kind supplied by the type descriptor.
+    pub(super) fn collection_type(&self) -> Option<u8> {
+        self.body().collection_type
     }
 
     /// Returns the quoted name used to discover this type.
@@ -125,10 +127,7 @@ impl DbObjectType {
 
     /// Creates an identity whose body will be populated during discovery.
     pub(super) fn new_internal(identity: DbObjectTypeIdentity) -> Self {
-        Self {
-            identity,
-            body: OnceLock::new(),
-        }
+        Self { identity, body: OnceLock::new() }
     }
 
     /// Returns the type OID used in metadata descriptors.
