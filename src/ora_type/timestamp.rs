@@ -112,7 +112,9 @@ impl OracleTimestamp {
         self,
         time_unit: TimeUnit,
     ) -> Result<i64, Error> {
-        let timestamp = chrono::NaiveDateTime::try_from(self)?.and_utc();
+        // The fields of a value with a time zone are in that time zone.
+        let utc = self.add_minutes(-self.tz_offset_minutes());
+        let timestamp = chrono::NaiveDateTime::try_from(utc)?.and_utc();
         match time_unit {
             TimeUnit::Second => Ok(timestamp.timestamp()),
             TimeUnit::Millisecond => Ok(timestamp.timestamp_millis()),

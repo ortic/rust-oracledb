@@ -249,7 +249,7 @@ fn test_1209() {
     let timestamp =
         oracledb::OracleTimestamp::new_timestamp(2026, 9, 3, 14, 5, 6, 0);
     assert!(!timestamp.has_time_zone() && !timestamp.is_utc());
-    assert_eq!(timestamp.to_string(), "2026-09-03T14:05:06.000000000");
+    assert_eq!(timestamp.to_string(), "2026-09-03T14:05:06");
 }
 
 #[rstest]
@@ -330,15 +330,15 @@ fn test_1211() {
     let new_timestamp_tz = oracledb::OracleTimestamp::new_timestamp_tz;
     assert_eq!(
         new_timestamp_tz(2026, 3, 1, 0, 15, 0, 0, -3, -30).to_string(),
-        "2026-03-01T00:15:00.000000000-03:30"
+        "2026-03-01T00:15:00-03:30"
     );
     assert_eq!(
         new_timestamp_tz(2026, 3, 1, 0, 15, 0, 0, 0, -30).to_string(),
-        "2026-03-01T00:15:00.000000000-00:30"
+        "2026-03-01T00:15:00-00:30"
     );
     assert_eq!(
         new_timestamp_tz(2026, 3, 1, 0, 15, 0, 0, -6, 0).to_string(),
-        "2026-03-01T00:15:00.000000000-06:00"
+        "2026-03-01T00:15:00-06:00"
     );
 }
 
@@ -427,12 +427,9 @@ fn test_1213(conn: oracledb::Connection) -> Result<(), oracledb::Error> {
     let display = |i| -> Result<String, oracledb::Error> {
         Ok(row.get::<oracledb::OracleTimestamp>(i)?.to_string())
     };
-    assert_eq!(
-        display(0)?,
-        "2026-07-01T12:00:00.000000000+02:00[Europe/Zurich]"
-    );
-    assert_eq!(display(1)?, "2026-01-15T12:00:00.000000000+00:00[UTC]");
-    assert_eq!(display(2)?, "2026-07-01T12:00:00.000000000+02:00");
+    assert_eq!(display(0)?, "2026-07-01T12:00:00+02:00[Europe/Zurich]");
+    assert_eq!(display(1)?, "2026-01-15T12:00:00+00:00[UTC]");
+    assert_eq!(display(2)?, "2026-07-01T12:00:00+02:00");
     Ok(())
 }
 

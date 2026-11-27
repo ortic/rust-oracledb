@@ -75,10 +75,10 @@ fn rules_name(region: &str) -> &str {
 }
 
 /// The regions by id, from V$TIMEZONE_NAMES of Oracle Database 23ai (time
-/// zone file version 43): the id is in the value DUMP() shows for
-/// FROM_TZ(timestamp, name), in bytes 12 and 13. Ids don't change between
-/// time zone file versions.
-static REGIONS: [(u16, &str); 600] = [
+/// zone file version 43, America/Coyhaique from 46): the id is in the value
+/// DUMP() shows for FROM_TZ(timestamp, name), in bytes 12 and 13. Ids don't
+/// change between time zone file versions.
+static REGIONS: [(u16, &str); 601] = [
     (1, "Etc/GMT"),
     (2, "Etc/GMT-14"),
     (3, "Etc/GMT-13"),
@@ -494,6 +494,7 @@ static REGIONS: [(u16, &str); 600] = [
     (416, "Pacific/Kanton"),
     (417, "Europe/Kyiv"),
     (418, "America/Ciudad_Juarez"),
+    (419, "America/Coyhaique"),
     (435, "Indian/Kerguelen"),
     (436, "Indian/Chagos"),
     (437, "Indian/Maldives"),
