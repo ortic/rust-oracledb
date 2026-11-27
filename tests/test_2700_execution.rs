@@ -30,6 +30,7 @@ use std::io::Read;
 
 mod common;
 
+use common::admin_conn;
 use common::conn;
 use rstest::*;
 
@@ -864,5 +865,63 @@ fn test_2730(conn: oracledb::Connection) -> Result<(), oracledb::Error> {
         "{error}"
     );
     conn.rollback()?;
+    Ok(())
+}
+
+#[rstest]
+/// Tests that queries run again after another session invalidated them
+/// (gathering statistics, creating an index) return all of their rows: with
+/// the cursor of a query fetched to its end kept open, one whose rows all
+/// came with the execute failed with ORA-01002, and one that ended in a fetch
+/// returned rows short.
+fn test_2731(
+    admin_conn: oracledb::Connection,
+    conn: oracledb::Connection,
+) -> Result<(), oracledb::Error> {
+    let _guard = common::create_table(
+        &conn,
+        "test_2731",
+        "id number primary key, text clob",
+    )?;
+    conn.execute(
+        "insert into test_2731 select level, to_clob(level) from dual \
+         connect by level <= 300",
+        &[],
+    )?;
+    conn.commit()?;
+    let owner = oracledb::get_test_config().user.to_uppercase();
+    let queries = [
+        ("select * from (select * from test_2731) where 1 = 0", 0),
+        ("select * from test_2731 where id = 1", 1),
+        ("select * from test_2731", 300),
+    ];
+    let count = |sql: &str| -> Result<usize, oracledb::Error> {
+        let stmt = conn.statement(sql)?.build()?;
+        let mut count = 0;
+        for row in stmt.query(&[])? {
+            row?;
+            count += 1;
+        }
+        Ok(count)
+    };
+    for invalidation in [
+        // not an invalidation: the statements run from the cache once first
+        format!("comment on table {owner}.test_2731 is 'test_2731'"),
+        format!(
+            "begin dbms_stats.gather_table_stats('{owner}', 'TEST_2731', \
+             no_invalidate => false); end;"
+        ),
+        format!(
+            "create index {owner}.test_2731_ix on {owner}.test_2731 (id, 1)"
+        ),
+    ] {
+        for (sql, expected) in queries {
+            assert_eq!(count(sql)?, expected, "{sql}");
+        }
+        admin_conn.execute(&invalidation, &[])?;
+        for (sql, expected) in queries {
+            assert_eq!(count(sql)?, expected, "{sql} after {invalidation}");
+        }
+    }
     Ok(())
 }

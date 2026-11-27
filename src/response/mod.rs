@@ -150,6 +150,13 @@ impl Response {
             if statement.is_query()
                 && db_error.code() == constants::DB_ERR_NUM_NO_DATA_FOUND
             {
+                // The cursor of a query fetched to its end is closed, as it
+                // was before upstream's f636ca4: re-executed once another
+                // session has invalidated it (gathering statistics, creating
+                // an index), it failed with ORA-01002 when its rows had all
+                // come with the execute, and returned rows short (200 of 300)
+                // when it had ended in a fetch.
+                client.close_cursor(statement);
                 self.end_of_fetch = true;
                 Ok(())
             } else {
