@@ -508,3 +508,198 @@ fn test_3208(
     }
     Ok(())
 }
+
+#[rstest]
+/// Split and combine responses, retaining row order and the final partial
+/// batch.
+fn test_3209(conn: oracledb::Connection) -> Result<(), oracledb::Error> {
+    let sql = r#"select cast(level as number(9)) as ID
+                 from dual connect by level <= 12 order by ID"#;
+    let batches = conn
+        .statement(sql)?
+        .arrow_batch_size(5)
+        .build()?
+        .query_arrow_batches(oracledb::BindParameters::default())?;
+    let mut sizes = Vec::new();
+    let mut ids = Vec::new();
+    for batch in batches {
+        let batch = batch?;
+        sizes.push(batch.num_rows());
+        ids.extend_from_slice(
+            batch
+                .column(0)
+                .as_any()
+                .downcast_ref::<Int32Array>()
+                .unwrap()
+                .values(),
+        );
+    }
+    assert_eq!(sizes, [5, 5, 2]);
+    assert_eq!(ids, (1..=12).collect::<Vec<i32>>());
+    Ok(())
+}
+
+#[rstest]
+/// Combine bind results into two full batches and a final partial batch.
+fn test_3210(conn: oracledb::Connection) -> Result<(), oracledb::Error> {
+    let params = arrow_array::RecordBatch::try_from_iter(vec![(
+        "ID",
+        std::sync::Arc::new(Int32Array::from_iter_values(1..=103))
+            as arrow_array::ArrayRef,
+    )])?;
+    let batches = conn
+        .statement("select cast(:1 as number(9)) as ID from dual")?
+        .arrow_batch_size(50)
+        .build()?
+        .query_arrow_batches(params)?;
+    let mut sizes = Vec::new();
+    let mut ids = Vec::new();
+    for batch in batches {
+        let batch = batch?;
+        sizes.push(batch.num_rows());
+        ids.extend_from_slice(
+            batch
+                .column(0)
+                .as_any()
+                .downcast_ref::<Int32Array>()
+                .unwrap()
+                .values(),
+        );
+    }
+    assert_eq!(sizes, [50, 50, 3]);
+    assert_eq!(ids, (1..=103).collect::<Vec<i32>>());
+    Ok(())
+}
+
+#[rstest]
+/// An error while filling a partial batch ends iteration.
+fn test_3211(conn: oracledb::Connection) -> Result<(), oracledb::Error> {
+    let rows: &[&[&dyn oracledb::ToDbValue]] = &[&[&1], &[&2], &[&1], &[&0]];
+    let mut batches = conn
+        .statement("select cast(10 / :1 as number(9)) as VALUE from dual")?
+        .arrow_batch_size(2)
+        .build()?
+        .query_arrow_batches(rows)?;
+    assert_eq!(batches.next().unwrap()?.num_rows(), 2);
+    let error = batches.next().unwrap().unwrap_err();
+    let arrow_schema::ArrowError::ExternalError(source) = error else {
+        panic!("expected driver error");
+    };
+    let error = source.downcast_ref::<oracledb::Error>().unwrap();
+    assert_eq!(error.db_error_code(), Some(1476));
+    assert!(batches.next().is_none());
+    Ok(())
+}
+
+#[rstest]
+/// Without an output size, return one batch per 1,024 rows.
+fn test_3212(conn: oracledb::Connection) -> Result<(), oracledb::Error> {
+    let sql = "select cast(level as number(9)) as ID \
+              from dual connect by level <= 1025 order by ID";
+    let batches =
+        conn.query_arrow_batches(sql, oracledb::BindParameters::default())?;
+    let mut sizes = Vec::new();
+    for batch in batches {
+        sizes.push(batch?.num_rows());
+    }
+    assert_eq!(sizes, [1024, 1]);
+    Ok(())
+}
+
+#[rstest]
+/// Return a short final result when fewer rows exist than the requested size.
+fn test_3213(conn: oracledb::Connection) -> Result<(), oracledb::Error> {
+    let mut batches = conn
+        .statement(
+            "select cast(level as number(9)) as ID \
+             from dual connect by level <= 3 order by ID",
+        )?
+        .arrow_batch_size(10)
+        .build()?
+        .query_arrow_batches(oracledb::BindParameters::default())?;
+    assert_eq!(batches.next().unwrap()?.num_rows(), 3);
+    assert!(batches.next().is_none());
+    Ok(())
+}
+
+#[rstest]
+/// Preserve the schema and yield no batches for an empty result.
+fn test_3214(conn: oracledb::Connection) -> Result<(), oracledb::Error> {
+    let mut batches = conn
+        .statement("select cast(1 as number(9)) as ID from dual where 1 = 0")?
+        .arrow_batch_size(3)
+        .build()?
+        .query_arrow_batches(oracledb::BindParameters::default())?;
+    assert_eq!(batches.schema().field(0).name(), "ID");
+    assert!(batches.next().is_none());
+    Ok(())
+}
+
+#[rstest]
+/// test Arrow fetch for TIMESTAMP WITH TIME ZONE
+fn test_3215(conn: oracledb::Connection) -> Result<(), oracledb::Error> {
+    let batch = conn.query_arrow(
+        r#"
+        select cast(to_timestamp_tz('2025-10-31 11:52:15.456 -06:00',
+                   'YYYY-MM-DD HH24:MI:SS.FF3 TZH:TZM')
+                   as timestamp(3) with time zone)
+        from dual
+        "#,
+        oracledb::BindParameters::default(),
+    )?;
+    assert_eq!(batch.num_rows(), 1);
+    assert_eq!(
+        batch.schema().field(0).data_type(),
+        &DataType::Timestamp(TimeUnit::Millisecond, Some("UTC".into()))
+    );
+    let expected_tstz = chrono::NaiveDate::from_ymd_opt(2025, 10, 31)
+        .unwrap()
+        .and_hms_milli_opt(17, 52, 15, 456)
+        .unwrap()
+        .and_utc();
+    assert_eq!(
+        batch
+            .column(0)
+            .as_any()
+            .downcast_ref::<TimestampMillisecondArray>()
+            .unwrap()
+            .value(0),
+        expected_tstz.timestamp_millis()
+    );
+    Ok(())
+}
+
+#[rstest]
+/// test Arrow fetch for TIMESTAMP WITH LOCAL TIME ZONE
+fn test_3216(conn: oracledb::Connection) -> Result<(), oracledb::Error> {
+    let batch = conn.query_arrow(
+        r#"
+        select cast(to_timestamp('2025-10-31 11:46:01.987654',
+                   'YYYY-MM-DD HH24:MI:SS.FF6')
+                   as timestamp(6) with local time zone)
+        from dual
+        "#,
+        oracledb::BindParameters::default(),
+    )?;
+    assert_eq!(batch.num_rows(), 1);
+    assert_eq!(
+        batch.schema().field(0).data_type(),
+        &DataType::Timestamp(TimeUnit::Microsecond, Some("UTC".into()))
+    );
+
+    let expected_ltz = chrono::NaiveDate::from_ymd_opt(2025, 10, 31)
+        .unwrap()
+        .and_hms_micro_opt(11, 46, 1, 987_654)
+        .unwrap()
+        .and_utc();
+    assert_eq!(
+        batch
+            .column(0)
+            .as_any()
+            .downcast_ref::<TimestampMicrosecondArray>()
+            .unwrap()
+            .value(0),
+        expected_ltz.timestamp_micros()
+    );
+    Ok(())
+}

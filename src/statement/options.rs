@@ -39,6 +39,8 @@ pub(crate) struct StatementOptions {
     batch_errors: bool,
     #[cfg(feature = "arrow")]
     requested_schema: Option<SchemaRef>,
+    #[cfg(feature = "arrow")]
+    arrow_batch_size: Option<usize>,
 }
 
 impl StatementOptions {
@@ -51,7 +53,14 @@ impl StatementOptions {
             batch_errors: false,
             #[cfg(feature = "arrow")]
             requested_schema: None,
+            #[cfg(feature = "arrow")]
+            arrow_batch_size: None,
         }
+    }
+
+    #[cfg(feature = "arrow")]
+    pub(crate) fn arrow_batch_size(&self) -> usize {
+        self.arrow_batch_size.unwrap_or(1024)
     }
 
     /// Returns whether the errors of a batch's rows are collected instead of
@@ -87,6 +96,11 @@ impl StatementOptions {
     #[cfg(feature = "arrow")]
     pub(crate) fn requested_schema(&self) -> Option<&SchemaRef> {
         self.requested_schema.as_ref()
+    }
+
+    #[cfg(feature = "arrow")]
+    pub(crate) fn set_arrow_batch_size(&mut self, value: usize) {
+        self.arrow_batch_size = Some(value);
     }
 
     /// Sets the number of rows to fetch each time rows are fetched.

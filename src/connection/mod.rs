@@ -33,6 +33,7 @@ mod conn_impl;
 pub(crate) use conn_impl::ConnImpl;
 pub(crate) use conn_impl::ConnImplStatus;
 
+use std::fmt;
 use std::sync::Arc;
 
 use crate::bind_params::BindParameters;
@@ -103,8 +104,8 @@ impl Connection {
 
     /// Returns the "call timeout" value currently in effect by the connection
     /// or an error if the connection is closed. A value of None means that
-    /// there is no limit to the amount of time the client will wait for a
-    /// database response and is the initial default value.
+    /// there is no timeout on socket reads or writes and is the initial
+    /// default value.
     pub fn call_timeout(&self) -> Result<Option<std::time::Duration>, Error> {
         self.get_impl()?.get_call_timeout()
     }
@@ -167,10 +168,10 @@ impl Connection {
 
     /// Executes a SQL statement against the database multiple times in one
     /// round trip.
-    pub fn execute_batch<'a>(
+    pub fn execute_batch<'params>(
         &self,
         sql: &str,
-        params: impl Into<BindParameters<'a>>,
+        params: impl Into<BindParameters<'params>>,
     ) -> Result<ExecBatchResult, Error> {
         self.get_impl()?.execute_batch(sql, params.into())
     }
@@ -229,12 +230,26 @@ impl Connection {
     #[cfg(feature = "arrow")]
     /// Executes a query against the database and returns a single Arrow
     /// RecordBatch containing the results of the query.
-    pub fn query_arrow<'a>(
+    pub fn query_arrow<'params>(
         &self,
         sql: &str,
-        params: impl Into<BindParameters<'a>>,
+        params: impl Into<BindParameters<'params>>,
     ) -> Result<arrow_array::RecordBatch, Error> {
         self.get_impl()?.query_arrow(sql, params.into())
+    }
+
+    #[cfg(feature = "arrow")]
+    /// Executes a query and returns Arrow's standard record batch reader.
+    ///
+    /// The reader exposes a schema and yields results one record batch at a
+    /// time. Use it to process results incrementally instead of collecting
+    /// them into one batch. See [crate::ArrowBatchReader] for details.
+    pub fn query_arrow_batches<'params>(
+        &self,
+        sql: &str,
+        params: impl Into<BindParameters<'params>>,
+    ) -> Result<crate::ArrowBatchReader<'params>, Error> {
+        self.get_impl()?.query_arrow_batches(sql, params.into())
     }
 
     /// Executes a query against the database using named parameters.
@@ -293,9 +308,8 @@ impl Connection {
     }
 
     /// Sets the "call timeout" value which is the length of time that is
-    /// permitted for the database response to be returned to a request sent by
-    /// the client. If None, there is no limit and the client will wait
-    /// indefinitely.
+    /// permitted for socket reads and writes. If None, there is no limit and
+    /// the client will wait indefinitely.
     pub fn set_call_timeout(
         &self,
         duration: Option<std::time::Duration>,
@@ -359,6 +373,23 @@ impl Connection {
     /// Returns the version of the database.
     pub fn version(&self) -> Result<OracleVersion, Error> {
         Ok(self.get_impl()?.get_server_version())
+    }
+}
+
+impl fmt::Debug for Connection {
+    fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
+        let mut s = f.debug_struct("Connection");
+        s.field("open", &self.conn_impl.is_some());
+        s.field("pooled", &self.pool_contents_ref.is_some());
+        if let Some(ref conn_impl) = self.conn_impl {
+            s.field("db_name", &conn_impl.get_db_name());
+            s.field("db_domain", &conn_impl.get_db_domain());
+            s.field("service_name", &conn_impl.get_service_name());
+            s.field("instance_name", &conn_impl.get_instance_name());
+            s.field("session_id", &conn_impl.get_session_id());
+            s.field("serial_num", &conn_impl.get_serial_num());
+        }
+        s.finish()
     }
 }
 

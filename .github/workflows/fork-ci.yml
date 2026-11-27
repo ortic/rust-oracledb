@@ -77,6 +77,9 @@ jobs:
           grant create session, create table, create procedure, create type,
                 create view, select any dictionary, change notification,
                 unlimited tablespace to rsotest;
+          create user rsotestproxy identified by Rsotestproxy_1;
+          grant create session to rsotestproxy;
+          alter user rsotestproxy grant connect through rsotest;
           EOF
       - run: cargo test --all-features --no-fail-fast
       # The suite again over TLS (cancelling included), with a self-signed

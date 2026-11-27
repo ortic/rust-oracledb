@@ -71,10 +71,13 @@ Database bind type.
 | `Int8`, `Int16`, `Int32`, `Int64` | `DB_TYPE_NUMBER` |
 | `UInt8`, `UInt16`, `UInt32`, `UInt64` | `DB_TYPE_NUMBER` |
 | `Decimal128` | `DB_TYPE_NUMBER` |
+| `Decimal256` | `DB_TYPE_NUMBER` |
 | `Null` | `DB_TYPE_NUMBER` |
 | `Float16`, `Float32` | `DB_TYPE_BINARY_FLOAT` |
 | `Float64` | `DB_TYPE_BINARY_DOUBLE` |
-| `Date32`, `Date64`, `Timestamp` | `DB_TYPE_TIMESTAMP` |
+| `Date32`, `Date64` | `DB_TYPE_TIMESTAMP` |
+| `Timestamp` with no timezone or empty timezone metadata | `DB_TYPE_TIMESTAMP` |
+| `Timestamp` with non-empty timezone metadata | `DB_TYPE_TIMESTAMP_TZ` |
 | `Utf8`, `LargeUtf8` | `DB_TYPE_VARCHAR` |
 | `Binary`, `LargeBinary`, `FixedSizeBinary` | `DB_TYPE_RAW` |
 
@@ -130,18 +133,56 @@ id=1, name=Anna
 id=2, name=John
 ```
 
+To process results incrementally, use
+[Connection::query_arrow_batches()](crate::Connection::query_arrow_batches)
+or [Statement::query_arrow_batches()](crate::Statement::query_arrow_batches).
+They return an [ArrowBatchReader](crate::ArrowBatchReader), which implements
+Arrow's `RecordBatchReader` interface: a schema and a sequence of `RecordBatch`
+values. This lets Arrow consumers process results incrementally without
+collecting the entire query result into one batch. For example:
+
+```rust
+let mut batches = connection
+    .statement("select id, name from arrow_table order by id")?
+    .build()?
+    .query_arrow_batches(oracledb::BindParameters::default())?;
+
+println!("Schema: {:?}", batches.schema());
+println!("Columns: {}", batches.columns().len());
+
+for result in &mut batches {
+    let batch = result?;
+    println!("Fetched {} rows", batch.num_rows());
+    // Process the batch here. Break to stop before fetching further batches.
+}
+```
+
 To control the output types or schema metadata, execute the query through a
 `StatementBuilder` and call
 [StatementBuilder::with_requested_schema()](crate::StatementBuilder::with_requested_schema).
 See [Requesting an Arrow Schema](#arrowrequestedschema).
+
+By default, each set of 1,024 rows produces one Arrow batch. Use
+[StatementBuilder::arrow_batch_size()](crate::StatementBuilder::arrow_batch_size)
+to specify a different number of rows for each Arrow batch:
+
+```rust
+let batches = connection
+    .statement("select id, name from arrow_table order by id")?
+    .arrow_batch_size(50)
+    .build()?
+    .query_arrow_batches(oracledb::BindParameters::default())?;
+```
 
 ### <a name="arrowfetchtypemapping"></a> 13.2.1 Arrow Fetch Type Mapping
 
 Rust-oracledb maps Oracle Database column types to Arrow array types when
 fetching query results as Arrow data.
 
-When query results are fetched with `Connection.query_arrow()`, rust-oracledb
-derives the Arrow schema from the query result metadata.
+When query results are fetched with
+[Connection::query_arrow()](crate::Connection::query_arrow) or
+[Connection::query_arrow_batches()](crate::Connection::query_arrow_batches),
+rust-oracledb derives the Arrow schema from the query result metadata.
 
 The following table shows how oracledb database types are mapped to Apache
 Arrow Rust array data types when fetching query results as an Arrow
@@ -154,7 +195,8 @@ second column displays the Arrow type.
 | `DB_TYPE_CLOB`, `DB_TYPE_NCLOB` and `DB_TYPE_LONG` | `LargeUtf8` |
 | `DB_TYPE_RAW` | `Binary` |
 | `DB_TYPE_BLOB` and `DB_TYPE_LONG_RAW` | `LargeBinary` |
-| `DB_TYPE_DATE`, `DB_TYPE_TIMESTAMP`, `DB_TYPE_TIMESTAMP_TZ`, and `DB_TYPE_TIMESTAMP_LTZ` | `Timestamp(unit, None)` |
+| `DB_TYPE_DATE`, `DB_TYPE_TIMESTAMP` | `Timestamp(unit, None)` |
+| `DB_TYPE_TIMESTAMP_TZ`, `DB_TYPE_TIMESTAMP_LTZ` | `Timestamp(unit, Some("UTC"))` |
 | `DB_TYPE_BINARY_FLOAT` | `Float32` |
 | `DB_TYPE_BINARY_DOUBLE` | `Float64` |
 | `DB_TYPE_BOOLEAN` | `Boolean` |
@@ -168,6 +210,11 @@ second column displays the Arrow type.
 `DATE` values use seconds. `TIMESTAMP` values use seconds for scale 0,
 milliseconds for scales 1 to 3, microseconds for scales 4 to 6, and nanoseconds
 for scales 7 to 9.
+
+`TIMESTAMP WITH TIME ZONE` and `TIMESTAMP WITH LOCAL TIME ZONE` columns use UTC
+timezone metadata in the Arrow schema. Oracle stores local time zone values in
+the database time zone. Leave this set to `UTC` in order to avoid the
+conversion from the database time zone to UTC.
 
 For Arrow decimal values, Arrow requires a fixed precision and scale. If an
 Oracle `NUMBER` column does not have fixed precision, or if its scale cannot be
@@ -213,7 +260,7 @@ The following requested conversions are supported:
 | `NUMBER` | `Int8`, `Int16`, `Int32`, `Int64` |
 | `NUMBER` | `UInt8`, `UInt16`, `UInt32`, `UInt64` |
 | `NUMBER` | `Float32`, `Float64` |
-| `NUMBER` | `Decimal128(precision, scale)` |
+| `NUMBER` | `Decimal128(precision, scale)`, `Decimal256(precision, scale)` |
 | `NUMBER` | `Utf8`, `LargeUtf8` |
 | Character types, including CLOB, NCLOB, LONG, and ROWID types | `Utf8`, `LargeUtf8` |
 | RAW, LONG RAW, and BLOB | `Binary`, `LargeBinary` |
@@ -223,13 +270,20 @@ The following requested conversions are supported:
 | `BOOLEAN` | `Boolean` |
 
 Values must fit the requested type. Integer conversions require whole numbers
-within the target integer range. Decimal128 conversions must preserve the
-value exactly and fit the requested precision and scale. Timestamp units
-coarser than the stored precision discard fractional digits. Timestamp
-timezone metadata does not perform a timezone conversion.
+within the target integer range. Decimal128 and Decimal256 conversions must
+preserve the value exactly and fit the requested precision and scale.
+Timestamp units coarser than the stored precision discard fractional digits.
+Timestamp timezone metadata does not perform a timezone conversion.
 
 An incompatible type, invalid decimal definition, or column count mismatch
 returns an error. Without a requested schema, the default fetch mappings
 continue to apply.
+
+Decimal256 supports precision up to 76. Request a Decimal256 field to fetch
+NUMBER values whose scaled coefficients do not fit Decimal128. The requested
+precision and scale must represent every fetched NUMBER value exactly.
+Decimal256 is not selected by the default fetch mappings. Bound Decimal256
+values must fit Oracle NUMBER's numeric range and the driver's NUMBER
+representation. Values that cannot be represented return an error.
 
 [Apache Arrow]: https://docs.rs/crate/arrow/latest

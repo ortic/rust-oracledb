@@ -33,9 +33,8 @@ use std::fmt;
 use crate::constants;
 use crate::error::Error;
 use crate::read_buffer::ReadBuffer;
-use crate::response::Response;
 
-#[derive(Clone, Debug)]
+#[derive(Clone)]
 pub struct Rowid {
     rba: u32,
     partition_id: u16,
@@ -44,13 +43,13 @@ pub struct Rowid {
 }
 
 impl Rowid {
-    /// Deserializes a rowid from a database response.
-    pub(crate) fn deserialize(resp: &mut Response) -> Result<Self, Error> {
-        let rba = resp.read_ub4()?;
-        let partition_id = resp.read_ub2()?;
-        resp.advance(1)?;
-        let block_num = resp.read_ub4()?;
-        let slot_num = resp.read_ub2()?;
+    /// Deserializes a rowid from a database response buffer.
+    pub(crate) fn deserialize(buf: &mut ReadBuffer) -> Result<Self, Error> {
+        let rba = buf.read_ub4()?;
+        let partition_id = buf.read_ub2()?;
+        buf.read_u8()?;
+        let block_num = buf.read_ub4()?;
+        let slot_num = buf.read_ub2()?;
         Ok(Self { rba, partition_id, block_num, slot_num })
     }
 
@@ -72,6 +71,12 @@ impl fmt::Display for Rowid {
         convert_base64(&mut output[9..15], self.block_num.try_into().unwrap());
         convert_base64(&mut output[15..18], self.slot_num.into());
         f.write_str(std::str::from_utf8(&output).unwrap())
+    }
+}
+
+impl fmt::Debug for Rowid {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_tuple("Rowid").field(&self.to_string()).finish()
     }
 }
 

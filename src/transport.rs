@@ -38,6 +38,7 @@ use std::os::windows::io::AsRawSocket;
 use pkcs8::DecodePrivateKey;
 use rustls::ClientConfig as TlsClientConfig;
 use rustls::ClientConnection as TlsClientConnection;
+use rustls::crypto::CryptoProvider;
 use rustls::pki_types::CertificateDer;
 use rustls::pki_types::PrivateKeyDer;
 use rustls::pki_types::pem::PemObject;
@@ -225,7 +226,7 @@ impl LowLevelTransport {
                 config.get_wallet_password_bytes(),
             )?;
         }
-        let tls_config = resolver.get_tls_config();
+        let tls_config = resolver.get_tls_config()?;
         let tls_server_name: rustls::pki_types::ServerName =
             server_name.to_string().try_into().unwrap();
         let conn = rustls::ClientConnection::new(
@@ -248,8 +249,8 @@ impl LowLevelTransport {
         }
     }
 
-    /// Sets the read timeout for the low level transport.
-    pub(crate) fn set_read_timeout(
+    /// Sets the read and write timeouts for the low level transport.
+    pub(crate) fn set_timeout(
         &self,
         duration: Option<std::time::Duration>,
     ) -> Result<(), Error> {
@@ -257,7 +258,8 @@ impl LowLevelTransport {
             Self::Tcp(s) => s,
             Self::Tls(s) => &s.sock,
         };
-        Ok(stream.set_read_timeout(duration)?)
+        stream.set_read_timeout(duration)?;
+        Ok(stream.set_write_timeout(duration)?)
     }
 
     /// Shuts down the low-level transport.
@@ -285,14 +287,17 @@ pub(crate) struct Transport {
     socket_num: String,
     max_packet_size: usize,
     read_buf: Vec<u8>,
+    available_bytes: usize,
+    used_bytes: usize,
     write_buf: Vec<u8>,
-    residual_bytes: usize,
-    last_packet_bytes: usize,
     full_packet_size: bool,
     print_packets: bool,
     op_num: usize,
     /// Native Network Encryption and Data Integrity, once negotiated.
     security: Option<NetworkSecurity>,
+    /// The last data packet received with Native Network Encryption or Data
+    /// Integrity, decrypted and verified.
+    nne_packet: Vec<u8>,
 }
 
 // a custom client certificate resolver is required because the client
@@ -300,6 +305,7 @@ pub(crate) struct Transport {
 // not accept anything less than v3 certificates
 #[derive(Debug)]
 struct CustomClientCertResolver {
+    provider: Arc<CryptoProvider>,
     key: Option<Arc<CertifiedKey>>,
     root_store: Option<rustls::RootCertStore>,
 }
@@ -370,34 +376,28 @@ impl Transport {
     /// Extracts a packet from the data that has been received from the
     /// database. If insufficient bytes have been read, None is returned which
     /// signals that the caller should wait for some more bytes to be received.
-    fn extract_packet(&mut self) -> Result<Option<Packet>, Error> {
-        if self.residual_bytes <= 4 {
-            return Ok(None);
+    fn extract_packet(&mut self) -> Option<usize> {
+        // insufficient bytes to read the packet size
+        if self.available_bytes <= 4 {
+            return None;
         }
-        self.last_packet_bytes = self.get_packet_size();
-        if self.residual_bytes < self.last_packet_bytes {
-            return Ok(None);
+
+        // determine packet size and see if enough bytes are available to read
+        // a full packet
+        let packet_size = if self.full_packet_size {
+            let buf = &self.read_buf[0..4];
+            u32::from_be_bytes(buf.try_into().unwrap()) as usize
+        } else {
+            let buf = &self.read_buf[0..2];
+            u16::from_be_bytes(buf.try_into().unwrap()) as usize
+        };
+        if self.available_bytes < packet_size {
+            return None;
         }
-        self.residual_bytes -= self.last_packet_bytes;
-        let packet_buf = &self.read_buf[0..self.last_packet_bytes];
-        if self.print_packets {
-            self.op_num += 1;
-            let header = self.get_op_header("Receiving packet");
-            print_packet(&header, packet_buf);
-        }
-        let mut packet = Packet::new(packet_buf);
-        if let Some(security) = self.security.as_mut() {
-            if packet.packet_type == constants::PACKET_TYPE_DATA {
-                security.unwrap(&mut packet.buf)?;
-                if self.print_packets {
-                    let header = self.get_op_header("Received payload");
-                    print_packet(&header, &packet.buf);
-                }
-            } else if packet.has_reset_marker() {
-                security.reset();
-            }
-        }
-        Ok(Some(packet))
+
+        // all of the bytes are available so return the packet size
+        self.used_bytes = packet_size;
+        Some(packet_size)
     }
 
     /// Returns the op header used when displaying packet data.
@@ -411,27 +411,22 @@ impl Transport {
         )
     }
 
-    /// Returns the size of the packet by examining the packet header. The
-    /// first few packets use a 16-bit packet size but once negotiation is
-    /// complete a 32-bit packet size is used.
-    fn get_packet_size(&self) -> usize {
-        if self.full_packet_size {
-            let buf = &self.read_buf[0..4];
-            u32::from_be_bytes(buf.try_into().unwrap()) as usize
-        } else {
-            let buf = &self.read_buf[0..2];
-            u16::from_be_bytes(buf.try_into().unwrap()) as usize
-        }
-    }
-
     /// Attempts to read a packet from the stream, if it is connected. The
     /// number of bytes read is returned.
-    fn read_packet(&mut self) -> Result<usize, Error> {
-        let buf = &mut self.read_buf[self.residual_bytes..];
-        self.low_level_transport
+    fn read_packet(&mut self) -> Result<(), Error> {
+        let buf = &mut self.read_buf[self.available_bytes..];
+        let num_bytes = self
+            .low_level_transport
             .as_mut()
             .ok_or_else(Error::not_connected)
-            .and_then(|t| t.read(buf))
+            .and_then(|t| t.read(buf))?;
+        if num_bytes == 0 {
+            self.low_level_transport = None;
+            Err(Error::dead_connection())
+        } else {
+            self.available_bytes += num_bytes;
+            Ok(())
+        }
     }
 
     /// Writes a packet to the stream, if the stream is currently connected.
@@ -475,6 +470,7 @@ impl Transport {
     ) -> Result<(), Error> {
         stream.set_nodelay(true)?;
         stream.set_read_timeout(None)?;
+        stream.set_write_timeout(None)?;
         self.socket_num = get_socket_num(&stream);
         self.security = None;
         self.low_level_transport = Some(LowLevelTransport::Tcp(stream));
@@ -522,37 +518,67 @@ impl Transport {
             socket_num: String::new(),
             max_packet_size: 0,
             read_buf: Vec::new(),
+            available_bytes: 0,
+            used_bytes: 0,
             write_buf: Vec::new(),
-            residual_bytes: 0,
-            last_packet_bytes: 0,
             full_packet_size: false,
             print_packets: env::var_os("RSO_DEBUG_PACKETS").is_some(),
             op_num: 0,
             security: None,
+            nne_packet: Vec::new(),
         }
     }
 
     /// Reads data from the database and returns a single packet, or an error
     /// indicating that the connection is no longer valid.
-    pub(crate) fn receive_packet(&mut self) -> Result<Packet, Error> {
-        if self.residual_bytes > 0 && self.last_packet_bytes > 0 {
-            let start_pos = self.last_packet_bytes;
-            let end_pos = self.last_packet_bytes + self.residual_bytes;
-            self.read_buf.copy_within(start_pos..end_pos, 0);
-            self.last_packet_bytes = 0;
+    pub(crate) fn receive_packet(&mut self) -> Result<Packet<'_>, Error> {
+        if self.available_bytes > 0 && self.used_bytes > 0 {
+            if self.available_bytes > self.used_bytes {
+                self.read_buf
+                    .copy_within(self.used_bytes..self.available_bytes, 0);
+
+                self.available_bytes -= self.used_bytes;
+                self.used_bytes = 0;
+            } else {
+                self.available_bytes = 0;
+            }
+            self.used_bytes = 0;
         }
         loop {
-            if let Some(packet) = self.extract_packet()? {
-                return Ok(packet);
+            if let Some(packet_size) = self.extract_packet() {
+                let packet_buf = &self.read_buf[0..packet_size];
+                if self.print_packets {
+                    self.op_num += 1;
+                    let header = self.get_op_header("Receiving packet");
+                    print_packet(&header, packet_buf);
+                }
+                let Some(security) = self.security.as_mut() else {
+                    return Ok(Packet::new(packet_buf));
+                };
+                let packet = Packet::new(packet_buf);
+                if packet.packet_type() != constants::PACKET_TYPE_DATA {
+                    if packet.has_reset_marker() {
+                        security.reset();
+                    }
+                    return Ok(packet);
+                }
+                // The payload is decrypted and verified into a buffer of its
+                // own, after a copy of the header, as the packet borrows it.
+                let header_size =
+                    Packet::header_size(constants::PACKET_TYPE_DATA);
+                let mut payload = packet.data().to_vec();
+                security.unwrap(&mut payload)?;
+                self.nne_packet.clear();
+                self.nne_packet.extend_from_slice(&packet_buf[..header_size]);
+                self.nne_packet.extend_from_slice(&payload);
+                if self.print_packets {
+                    let header = self.get_op_header("Received payload");
+                    print_packet(&header, &payload);
+                }
+                return Ok(Packet::new(&self.nne_packet));
             }
-            let num_bytes = self.read_packet()?;
-            if num_bytes == 0 {
-                self.low_level_transport = None;
-                break;
-            }
-            self.residual_bytes += num_bytes;
+            self.read_packet()?;
         }
-        Err(Error::dead_connection())
     }
 
     pub(crate) fn send_packets(
@@ -562,10 +588,7 @@ impl Transport {
         data_flags: u16,
         mut data: &[u8],
     ) -> Result<(), Error> {
-        let mut header_size = 8;
-        if packet_type == constants::PACKET_TYPE_DATA {
-            header_size += 2;
-        }
+        let header_size = Packet::header_size(packet_type);
         let mut max_data_size = self.max_packet_size - header_size;
         let secured = packet_type == constants::PACKET_TYPE_DATA
             && self.security.is_some();
@@ -628,15 +651,15 @@ impl Transport {
         self.max_packet_size = size;
     }
 
-    /// Sets the read timeout for the transport.
-    pub(crate) fn set_read_timeout(
+    /// Sets the read and write timeouts for the transport.
+    pub(crate) fn set_timeout(
         &self,
         duration: Option<std::time::Duration>,
     ) -> Result<(), Error> {
         self.low_level_transport
             .as_ref()
             .ok_or_else(Error::not_connected)
-            .and_then(|t| t.set_read_timeout(duration))
+            .and_then(|t| t.set_timeout(duration))
     }
 
     /// Returns a writer for interrupts from another thread; None when not
@@ -690,6 +713,9 @@ impl CustomClientCertResolver {
     /// Creates a new empty structure and returns it.
     fn new() -> Self {
         Self {
+            provider: CryptoProvider::get_default().cloned().unwrap_or_else(
+                || Arc::new(rustls::crypto::ring::default_provider()),
+            ),
             key: None,
             root_store: Some(rustls::RootCertStore {
                 roots: webpki_roots::TLS_SERVER_ROOTS.into(),
@@ -698,11 +724,12 @@ impl CustomClientCertResolver {
     }
 
     /// Returns the TLS configuration to use when connecting to the database.
-    fn get_tls_config(mut self) -> TlsClientConfig {
+    fn get_tls_config(mut self) -> Result<TlsClientConfig, Error> {
         let root_store = self.root_store.take().unwrap();
-        TlsClientConfig::builder()
+        Ok(TlsClientConfig::builder_with_provider(self.provider.clone())
+            .with_safe_default_protocol_versions()?
             .with_root_certificates(root_store)
-            .with_client_cert_resolver(Arc::new(self))
+            .with_client_cert_resolver(Arc::new(self)))
     }
 
     /// Populates the certified key with the contents of the wallet defined in
@@ -767,9 +794,8 @@ impl CustomClientCertResolver {
         // if a private key was found, setup the certified key to pass to the
         // server
         if let Some(key) = private_key {
-            let builder = TlsClientConfig::builder();
-            let provider = builder.crypto_provider();
-            let signing_key = provider.key_provider.load_private_key(key)?;
+            let signing_key =
+                self.provider.key_provider.load_private_key(key)?;
             self.key = Some(Arc::new(CertifiedKey::new(certs, signing_key)));
         } else {
             let root_store: &mut rustls::RootCertStore =

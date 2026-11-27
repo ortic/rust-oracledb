@@ -42,6 +42,7 @@ use crate::messages::Message;
 use crate::nne;
 use crate::nne::NativeNetworkEncryption;
 use crate::nne::Negotiated;
+use crate::read_buffer::ReadBuffer;
 use crate::response::Response;
 use crate::write_buffer::WriteBuffer;
 
@@ -121,11 +122,11 @@ fn write_header(buf: &mut WriteBuffer, len: usize, num_services: u16) {
 /// Reads the header of an item of service data, which must be of the given
 /// type, and returns the length of its value.
 fn read_item_header(
-    resp: &mut Response,
+    buf: &mut ReadBuffer,
     item_type: u16,
 ) -> Result<usize, Error> {
-    let len = resp.read_u16be()? as usize;
-    let received_type = resp.read_u16be()?;
+    let len = buf.read_u16be()? as usize;
+    let received_type = buf.read_u16be()?;
     if received_type != item_type {
         return Err(Error::network_security(format!(
             "expected an item of type {item_type}, got {received_type}"
@@ -134,29 +135,29 @@ fn read_item_header(
     Ok(len)
 }
 
-fn read_bytes_item(resp: &mut Response) -> Result<Vec<u8>, Error> {
-    let len = read_item_header(resp, ITEM_BYTES)?;
-    Ok(resp.read_bytes(len)?.to_vec())
+fn read_bytes_item(buf: &mut ReadBuffer) -> Result<Vec<u8>, Error> {
+    let len = read_item_header(buf, ITEM_BYTES)?;
+    Ok(buf.read_bytes(len)?.to_vec())
 }
 
-fn read_status_item(resp: &mut Response) -> Result<u16, Error> {
-    read_item_header(resp, ITEM_STATUS)?;
-    resp.read_u16be()
+fn read_status_item(buf: &mut ReadBuffer) -> Result<u16, Error> {
+    read_item_header(buf, ITEM_STATUS)?;
+    buf.read_u16be()
 }
 
-fn read_ub1_item(resp: &mut Response) -> Result<u8, Error> {
-    read_item_header(resp, ITEM_UB1)?;
-    resp.read_u8()
+fn read_ub1_item(buf: &mut ReadBuffer) -> Result<u8, Error> {
+    read_item_header(buf, ITEM_UB1)?;
+    buf.read_u8()
 }
 
-fn read_ub2_item(resp: &mut Response) -> Result<u16, Error> {
-    read_item_header(resp, ITEM_UB2)?;
-    resp.read_u16be()
+fn read_ub2_item(buf: &mut ReadBuffer) -> Result<u16, Error> {
+    read_item_header(buf, ITEM_UB2)?;
+    buf.read_u16be()
 }
 
-fn read_version_item(resp: &mut Response) -> Result<u32, Error> {
-    read_item_header(resp, ITEM_VERSION)?;
-    resp.read_u32be()
+fn read_version_item(buf: &mut ReadBuffer) -> Result<u32, Error> {
+    read_item_header(buf, ITEM_VERSION)?;
+    buf.read_u32be()
 }
 
 /// Returns an error for an error number the server sent instead of a
@@ -252,11 +253,11 @@ impl AnoMessage {
 
     fn read_authentication(
         &mut self,
-        resp: &mut Response,
+        buf: &mut ReadBuffer,
         _num_items: u16,
     ) -> Result<(), Error> {
-        read_version_item(resp)?;
-        let status = read_status_item(resp)?;
+        read_version_item(buf)?;
+        let status = read_status_item(buf)?;
         if status != AUTH_STATUS_NOT_ACTIVE {
             return Err(Error::not_implemented(
                 "network authentication services (Kerberos, NTS, RADIUS)"
@@ -268,11 +269,11 @@ impl AnoMessage {
 
     fn read_encryption(
         &mut self,
-        resp: &mut Response,
+        buf: &mut ReadBuffer,
         _num_items: u16,
     ) -> Result<(), Error> {
-        self.encryption_version = read_version_item(resp)?;
-        self.encryption_algorithm = read_ub1_item(resp)?;
+        self.encryption_version = read_version_item(buf)?;
+        self.encryption_algorithm = read_ub1_item(buf)?;
         Ok(())
     }
 
@@ -280,20 +281,20 @@ impl AnoMessage {
     /// the key exchange, and computes the client's half and the key agreed.
     fn read_integrity(
         &mut self,
-        resp: &mut Response,
+        buf: &mut ReadBuffer,
         num_items: u16,
     ) -> Result<(), Error> {
-        self.integrity_version = read_version_item(resp)?;
-        self.integrity_algorithm = read_ub1_item(resp)?;
+        self.integrity_version = read_version_item(buf)?;
+        self.integrity_algorithm = read_ub1_item(buf)?;
         if num_items != INTEGRITY_ITEMS_WITH_KEY_EXCHANGE {
             return Ok(());
         }
-        let key_bits = read_ub2_item(resp)? as usize;
-        let _prime_bits = read_ub2_item(resp)?;
-        let generator = BigUint::from_bytes_be(&read_bytes_item(resp)?);
-        let prime_bytes = read_bytes_item(resp)?;
-        let server_key_bytes = read_bytes_item(resp)?;
-        self.server_iv = read_bytes_item(resp)?;
+        let key_bits = read_ub2_item(buf)? as usize;
+        let _prime_bits = read_ub2_item(buf)?;
+        let generator = BigUint::from_bytes_be(&read_bytes_item(buf)?);
+        let prime_bytes = read_bytes_item(buf)?;
+        let server_key_bytes = read_bytes_item(buf)?;
+        self.server_iv = read_bytes_item(buf)?;
         let key_len = key_bits.div_ceil(8);
         if key_len == 0
             || prime_bytes.len() != key_len
@@ -327,17 +328,17 @@ impl AnoMessage {
 
     fn read_supervisor(
         &mut self,
-        resp: &mut Response,
+        buf: &mut ReadBuffer,
         _num_items: u16,
     ) -> Result<(), Error> {
-        read_version_item(resp)?;
-        let status = read_status_item(resp)?;
+        read_version_item(buf)?;
+        let status = read_status_item(buf)?;
         if status != SUPERVISOR_STATUS_OK {
             return Err(Error::network_security(format!(
                 "unexpected supervisor status {status}"
             )));
         }
-        read_bytes_item(resp)?; // the services the server knows
+        read_bytes_item(buf)?; // the services the server knows
         Ok(())
     }
 }
@@ -346,34 +347,35 @@ impl Message for AnoMessage {
     fn deserialize(
         &mut self,
         _client: &Client,
-        resp: &mut Response,
+        _resp: &mut Response,
+        buf: &mut ReadBuffer,
     ) -> Result<(), Error> {
-        if resp.read_u32be()? != MAGIC {
+        if buf.read_u32be()? != MAGIC {
             return Err(Error::network_security("invalid negotiation header"));
         }
-        resp.read_u16be()?; // length
-        resp.read_u32be()?; // version
-        let num_services = resp.read_u16be()?;
-        let error_flags = resp.read_u8()?;
+        buf.read_u16be()?; // length
+        buf.read_u32be()?; // version
+        let num_services = buf.read_u16be()?;
+        let error_flags = buf.read_u8()?;
         if error_flags != 0 {
             return Err(negotiation_refused(error_flags as u32));
         }
         for _ in 0..num_services {
-            let service = resp.read_u16be()?;
-            let num_items = resp.read_u16be()?;
-            let error_num = resp.read_u32be()?;
+            let service = buf.read_u16be()?;
+            let num_items = buf.read_u16be()?;
+            let error_num = buf.read_u32be()?;
             if error_num != 0 {
                 return Err(negotiation_refused(error_num));
             }
             match service {
                 SERVICE_AUTHENTICATION => {
-                    self.read_authentication(resp, num_items)?
+                    self.read_authentication(buf, num_items)?
                 }
-                SERVICE_ENCRYPTION => self.read_encryption(resp, num_items)?,
+                SERVICE_ENCRYPTION => self.read_encryption(buf, num_items)?,
                 SERVICE_DATA_INTEGRITY => {
-                    self.read_integrity(resp, num_items)?
+                    self.read_integrity(buf, num_items)?
                 }
-                SERVICE_SUPERVISOR => self.read_supervisor(resp, num_items)?,
+                SERVICE_SUPERVISOR => self.read_supervisor(buf, num_items)?,
                 _ => {
                     return Err(Error::network_security(format!(
                         "unknown service {service}"

@@ -68,7 +68,8 @@ use crate::messages::RollbackMessage;
 use crate::nne;
 use crate::nne::NativeNetworkEncryption;
 use crate::nne::NetworkSecurity;
-use crate::packet::Packet;
+use crate::ora_type::OracleIntervalDS;
+use crate::read_buffer::ReadBuffer;
 use crate::response::Response;
 use crate::row::DbRow;
 use crate::row::Row;
@@ -84,13 +85,18 @@ use capabilities::Capabilities;
 const TTC_SECURITY_CONTEXT_ATTACH_FLAG: u32 = 0x01;
 const TTC_END_USER_SECURITY_CONTEXT_KEY: &str = "ORCL_XS_AUTHZ_CONTEXT";
 
+const BUF_BASE_CAPACITY: usize = 8 * 1024;
+const BUF_MAX_CAPACITY: usize = 64 * 1024;
+
 pub struct Client {
     transport: Transport,
     /// Lets Connection::cancel() interrupt a round trip in progress.
     breaker: BreakerRef,
     caps: capabilities::Capabilities,
     config: Config,
-    combo_key: Option<[u8; 32]>,
+    read_buf: Vec<u8>,
+    write_buf: Vec<u8>,
+    combo_key: Option<Vec<u8>>,
     dbobject_type_cache: DbObjectTypeCache,
     charset_id: u16,
     ncharset_id: u16,
@@ -111,6 +117,7 @@ pub struct Client {
     last_warning: Option<String>,
     security_context: Option<EndUserSecurityContext>,
     temp_lobs_to_close: Vec<Vec<u8>>,
+    db_timezone_offset: OracleIntervalDS,
 }
 
 pub(crate) type ClientRef = std::sync::Arc<std::sync::Mutex<Client>>;
@@ -125,27 +132,22 @@ impl Client {
         message.pre_process(self);
         self.send_message(message)?;
         self.breaker.begin_round_trip();
-        let mut response = Response::new();
-        let result = self.receive_response(message, &mut response);
+        let result = self.receive_response(message);
         if self.breaker.end_round_trip() {
             self.absorb_late_break();
         }
-        if let Err(e) = result {
-            response.cleanup_pending_values(self);
-            Err(e)
-        } else {
-            Ok(response)
-        }
+        result
     }
 
     /// Process a control packet received from the database.
-    fn process_control_packet(&mut self, packet: Packet) -> Result<(), Error> {
-        let mut resp = Response::new();
-        resp.add_packets(vec![packet]);
-        let control_type = resp.read_u16be()?;
+    fn process_control_packet(
+        &mut self,
+        buf: &mut ReadBuffer,
+    ) -> Result<(), Error> {
+        let control_type = buf.read_u16be()?;
         if control_type == constants::TTC_CONTROL_TYPE_INBAND_NOTIF {
-            resp.advance(4)?;
-            self.pending_error_num = resp.read_u32be()? as usize;
+            buf.read_bytes(4)?;
+            self.pending_error_num = buf.read_u32be()? as usize;
         }
         Ok(())
     }
@@ -169,78 +171,95 @@ impl Client {
         Ok(response)
     }
 
-    /// Receives a data packet from the database. Control packets and marker
-    /// packets are processed. Only data packets are returned.
-    fn receive_data_packet(&mut self) -> Result<(Packet, bool), Error> {
+    /// Receives packet(s) making up the response from the server. If the
+    /// database is capable of indicating the end of its response, it will
+    /// continue receiving packets until the end of the response has been
+    /// received; otherwise, it will return immediately after a single data
+    /// packet has been received (which may or may not be the entire response).
+    fn receive_packets(
+        &mut self,
+        buf: &mut ReadBuffer,
+        resp: &mut Response,
+    ) -> Result<(), Error> {
+        let supports_end_of_response = self.supports_end_of_response();
         loop {
             match self.transport.receive_packet() {
-                Ok(packet) => match packet.packet_type {
+                Ok(packet) => match packet.packet_type() {
                     constants::PACKET_TYPE_CONTROL => {
-                        self.process_control_packet(packet)?;
+                        let mut buf = ReadBuffer::from_bytes(packet.data());
+                        self.process_control_packet(&mut buf)?;
                         continue;
                     }
                     constants::PACKET_TYPE_MARKER => {
-                        let packet = self
-                            .reset_after(packet.has_reset_marker())
+                        let has_reset_marker = packet.has_reset_marker();
+                        self.reset(has_reset_marker, buf, resp)
                             .map_err(|_| self.unrecoverable_error())?;
-                        return Ok((packet, false));
+                        break;
                     }
-                    _ => return Ok((packet, true)),
+                    _ => {
+                        resp.add_packet(&packet, buf);
+                        if !supports_end_of_response
+                            || packet.has_end_of_response()
+                        {
+                            break;
+                        }
+                    }
                 },
                 Err(err) => {
-                    if err.is_call_timeout_exceeded() {
-                        let packet = self.recover_from_error(err)?;
-                        return Ok((packet, false));
-                    }
-                    return Err(err);
+                    return if err.is_call_timeout_exceeded() {
+                        self.recover_from_error(err, buf, resp)
+                    } else {
+                        Err(err)
+                    };
                 }
             }
         }
-    }
-
-    /// Returns the list of packets making up the response from the server (if
-    /// the database is capable of indicating the end of its response) or a
-    /// single data packet which may not be the entire response.
-    fn receive_packets(&mut self) -> Result<Vec<Packet>, Error> {
-        let mut packets = Vec::<Packet>::new();
-        let supports_end_of_response = self.supports_end_of_response();
-        loop {
-            let (packet, check_end_of_response) =
-                self.receive_data_packet()?;
-            let wait_for_more = check_end_of_response
-                && supports_end_of_response
-                && !packet.has_end_of_response();
-            packets.push(packet);
-            if !wait_for_more {
-                break;
-            }
-        }
-        Ok(packets)
+        Ok(())
     }
 
     /// Returns the response of the database to the message sent by the client.
     fn receive_response(
         &mut self,
         message: &mut impl Message,
-        response: &mut Response,
+    ) -> Result<Response, Error> {
+        let mut buf = self.take_read_buf();
+        let mut resp = Response::new();
+        let result =
+            self.receive_response_helper(message, &mut buf, &mut resp);
+        self.return_read_buf(buf.take_buf());
+        result.inspect_err(|_| resp.cleanup_pending_values(self)).map(|_| resp)
+    }
+
+    /// Helper function that receives the response of the database to the
+    /// message sent by the client. Prior to Oracle AI Database 26ai, the
+    /// database does not give any indication of when the end of a response has
+    /// been reached. The only way to know is by attempting to deserialize the
+    /// response, and if during that attempt, the end of data is reached, more
+    /// packets are clearly required for that response.
+    fn receive_response_helper(
+        &mut self,
+        message: &mut impl Message,
+        buf: &mut ReadBuffer,
+        resp: &mut Response,
     ) -> Result<(), Error> {
-        response.add_packets(self.receive_packets()?);
-        message.pre_deserialize(self, response);
-        while let Err(e) = message.deserialize(self, response) {
+        self.receive_packets(buf, resp)?;
+        message.pre_deserialize(self, resp);
+        while let Err(e) = message.deserialize(self, resp, buf) {
             if e.is_out_of_data() {
-                response.add_packets(self.receive_packets()?);
+                resp.restore_buf_pos(buf);
+                self.receive_packets(buf, resp)?;
                 continue;
             }
             return Err(e);
         }
-        if response.get_flush_out_binds() {
+        if resp.get_flush_out_binds() {
             self.send_message(&mut FlushOutBindsMessage)?;
-            response.add_packets(self.receive_packets()?);
-            message.deserialize(self, response)?;
+            self.receive_packets(buf, resp)?;
+            message.deserialize(self, resp, buf)?;
         }
-        message.post_deserialize(self, response)?;
-        self.process_call_status(response.call_status());
-        if let Some(warning) = response.take_warning() {
+        message.post_deserialize(self, resp)?;
+        self.process_call_status(resp.call_status());
+        if let Some(warning) = resp.take_warning() {
             self.last_warning = Some(warning);
         }
         Ok(())
@@ -262,11 +281,29 @@ impl Client {
     /// an interrupt to the server and waiting for its response. If any error
     /// occurs during the recovery process, the connection is deemed unusable
     /// and the connection closed and an error returned.
-    fn recover_from_error(&mut self, err: Error) -> Result<Packet, Error> {
+    fn recover_from_error(
+        &mut self,
+        err: Error,
+        buf: &mut ReadBuffer,
+        resp: &mut Response,
+    ) -> Result<(), Error> {
         self.send_marker(constants::MARKER_TYPE_INTERRUPT)
-            .and_then(|_| self.reset())
+            .and_then(|_| self.reset(false, buf, resp))
             .map_err(|_| self.unrecoverable_error())
             .and_then(|_| Err(err))
+    }
+
+    /// Recycle the buffer used for the last request or response. The buffer is
+    /// cleared and, if the buffer exceeds the maximum capacity, is simply
+    /// dropped and a new one created with the baseline capacity instead.
+    fn recycle_buf(mut buf: Vec<u8>) -> Vec<u8> {
+        buf.clear();
+        if buf.capacity() <= BUF_MAX_CAPACITY {
+            buf
+        } else {
+            drop(buf);
+            Vec::with_capacity(BUF_BASE_CAPACITY)
+        }
     }
 
     /// Resets the transport after an error has taken place. All packets
@@ -274,28 +311,38 @@ impl Client {
     /// The packet received after the reset has completed is returned to the
     /// caller. Note that some databases return multiple reset markers so
     /// these are also accommodated.
-    fn reset(&mut self) -> Result<Packet, Error> {
-        self.reset_after(false)
-    }
-
-    /// Like reset(), when the server sent a marker first: if that was its
-    /// reset marker already (as on an interrupt), the next packet that isn't
-    /// a marker is the one to return; waiting for another reset marker would
-    /// never end.
-    fn reset_after(
+    fn reset(
         &mut self,
-        mut reset_received: bool,
-    ) -> Result<Packet, Error> {
+        reset_received: bool,
+        buf: &mut ReadBuffer,
+        resp: &mut Response,
+    ) -> Result<(), Error> {
         self.send_marker(constants::MARKER_TYPE_RESET)?;
+        let mut reset_received = reset_received;
+        resp.reset(buf);
         loop {
             let packet = self.transport.receive_packet()?;
             if packet.has_reset_marker() {
                 reset_received = true;
             } else if reset_received {
                 self.breaker.break_answered();
-                return Ok(packet);
+                resp.add_packet(&packet, buf);
+                break;
             }
         }
+        Ok(())
+    }
+
+    /// Returns the read buffer back to the client in order to reuse its heap
+    /// allocation.
+    fn return_read_buf(&mut self, buf: Vec<u8>) {
+        self.read_buf = Self::recycle_buf(buf)
+    }
+
+    /// Returns the write buffer back to the client in order to reuse its heap
+    /// allocation.
+    fn return_write_buf(&mut self, buf: Vec<u8>) {
+        self.write_buf = Self::recycle_buf(buf)
     }
 
     /// Sends a marker packet of the specified type to the database.
@@ -309,11 +356,22 @@ impl Client {
         &mut self,
         message: &mut impl Message,
     ) -> Result<(), Error> {
-        let mut buf = WriteBuffer::new();
+        let mut buf = self.take_write_buf();
+        let result = self.send_message_helper(message, &mut buf);
+        self.return_write_buf(buf.take_buf());
+        result
+    }
+
+    // Helper function that sends the message to the database.
+    fn send_message_helper(
+        &mut self,
+        message: &mut impl Message,
+        buf: &mut WriteBuffer,
+    ) -> Result<(), Error> {
         if message.get_packet_type() == constants::PACKET_TYPE_DATA {
-            self.write_piggybacks(&mut buf);
+            self.write_piggybacks(buf);
         }
-        message.serialize(self, &mut buf);
+        message.serialize(self, buf);
         let breaker = self.breaker.clone();
         let _writing = breaker.writing()?;
         self.transport.send_packets(
@@ -324,7 +382,7 @@ impl Client {
         )?;
         if message.extended_data_needed() {
             buf.clear();
-            message.serialize_extended_data(self, &mut buf);
+            message.serialize_extended_data(self, buf);
             self.transport.send_packets(
                 constants::PACKET_TYPE_DATA,
                 0,
@@ -333,6 +391,18 @@ impl Client {
             )?;
         }
         Ok(())
+    }
+
+    /// Takes the read buffer from the client in order to reuse its heap
+    /// allocation.
+    fn take_read_buf(&mut self) -> ReadBuffer {
+        ReadBuffer::from_owned_bytes(std::mem::take(&mut self.read_buf))
+    }
+
+    /// Returns the write buffer back to the client in order to reuse its heap
+    /// allocation.
+    fn take_write_buf(&mut self) -> WriteBuffer {
+        WriteBuffer::from_owned_bytes(std::mem::take(&mut self.write_buf))
     }
 
     /// Called when an unrecoverable error has taken place and the connection
@@ -628,7 +698,7 @@ impl Client {
             .set_new_password(new_password);
         mem::swap(&mut temp_config, &mut self.config);
         let mut auth_message = AuthMessage::new();
-        auth_message.set_combo_key(&self.combo_key.unwrap());
+        auth_message.set_combo_key(self.combo_key.as_ref().unwrap());
         let result = self.process_message(&mut auth_message);
         mem::swap(&mut temp_config, &mut self.config);
         result.map(|_| ())
@@ -727,8 +797,7 @@ impl Client {
         while !connect_message.accepted {
             self.process_message(&mut connect_message)?;
             if connect_message.redirect_data_len > 0 {
-                let mut response = Response::new();
-                self.receive_response(&mut connect_message, &mut response)?;
+                self.receive_response(&mut connect_message)?;
                 let redirect_data =
                     connect_message.redirect_data.take().unwrap();
                 if let Some((before, after)) =
@@ -842,13 +911,26 @@ impl Client {
         }
     }
 
+    /// Returns the database time zone offset.
+    pub(crate) fn db_timezone_offset(
+        &self,
+    ) -> Result<chrono::Duration, Error> {
+        if self.db_timezone_offset.days() != 0 {
+            Err(Error::not_implemented("named database time zone".to_string()))
+        } else {
+            let offset = self.db_timezone_offset;
+            Ok(chrono::Duration::hours(offset.hours().into())
+                + chrono::Duration::minutes(offset.minutes().into()))
+        }
+    }
+
     /// Ends the current request against the database.This clears any end user
     /// security context and warnings, rolls back any open transactions and
     /// releases any session to the DRCP pool, if applicable.
     pub(crate) fn end_request(&mut self) -> Result<(), Error> {
         self.security_context = None;
         self.last_warning = None;
-        self.transport.set_read_timeout(None)?;
+        self.transport.set_timeout(None)?;
         if self.in_request && self.pending_session_state != 0 {
             self.in_request = false;
         }
@@ -902,17 +984,28 @@ impl Client {
         }
     }
 
-    /// Performs a fetch and returns the database response.
+    /// Performs a fetch and returns the database response. Note that for REF
+    /// cursors (which do not have any SQL), a full execute (with fetch) is
+    /// required instead of a plain fetch.
     pub(crate) fn fetch(
         &mut self,
         statement: &mut CachedStatement,
         client_ref: &ClientRef,
         last_row: Option<DbRow>,
     ) -> Result<Response, Error> {
-        let mut message = FetchMessage::new(statement, last_row);
-        let mut response = self.process_message(&mut message)?;
-        response.complete_values(self, client_ref, statement)?;
-        Ok(response)
+        if statement.sql().is_empty() {
+            self.execute(
+                statement,
+                client_ref,
+                BindParameters::default(),
+                false,
+            )
+        } else {
+            let mut message = FetchMessage::new(statement, last_row);
+            let mut response = self.process_message(&mut message)?;
+            response.complete_values(self, client_ref, statement)?;
+            Ok(response)
+        }
     }
 
     /// Fetches all rows from the database given the initial response returned
@@ -1017,6 +1110,8 @@ impl Client {
             breaker: BreakerRef::default(),
             caps: Capabilities::new(),
             config,
+            read_buf: Vec::with_capacity(BUF_BASE_CAPACITY),
+            write_buf: Vec::with_capacity(BUF_BASE_CAPACITY),
             combo_key: None,
             dbobject_type_cache: DbObjectTypeCache::default(),
             charset_id: 0,
@@ -1038,6 +1133,7 @@ impl Client {
             transaction_in_progress: false,
             pool_id,
             temp_lobs_to_close: Vec::new(),
+            db_timezone_offset: OracleIntervalDS::default(),
         }
     }
 
@@ -1118,7 +1214,12 @@ impl Client {
         &self,
         duration: Option<std::time::Duration>,
     ) -> Result<(), Error> {
-        self.transport.set_read_timeout(duration)
+        self.transport.set_timeout(duration)
+    }
+
+    /// Sets the database time zone offset.
+    pub(crate) fn set_db_timezone_offset(&mut self, value: OracleIntervalDS) {
+        self.db_timezone_offset = value;
     }
 
     /// Sets the ids of the character sets in use by the database. The first

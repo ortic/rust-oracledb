@@ -31,6 +31,7 @@
 use crate::client::Client;
 use crate::constants;
 use crate::error::Error;
+use crate::read_buffer::ReadBuffer;
 use crate::response::Response;
 use crate::rowid::Rowid;
 
@@ -46,42 +47,43 @@ impl ErrorInfo {
     /// Deserializes the error information from the database response.
     pub fn deserialize(
         resp: &mut Response,
+        buf: &mut ReadBuffer,
         client: &Client,
     ) -> Result<ErrorInfo, Error> {
-        resp.deserialize_status()?;
-        let _current_row_num = resp.read_ub4()?;
-        let _error_num_short = resp.read_ub2()?;
-        let _array_elem_error_1 = resp.read_ub2()?;
-        let _array_elem_error_2 = resp.read_ub2()?;
-        let cursor_id = resp.read_ub2()?;
-        let error_pos = resp.read_ub2()?;
-        let _old_sql_type = resp.read_u8()?;
-        let _fatal = resp.read_u8()?;
-        let _flags_1 = resp.read_u8()?;
-        let _user_cursor_options = resp.read_u8()?;
-        let _upi_parameter = resp.read_u8()?;
-        let flags = resp.read_u8()?;
-        let _rowid = Rowid::deserialize(resp)?;
-        let _os_error = resp.read_ub4()?;
-        let _statement_num = resp.read_u8()?;
-        let _call_num = resp.read_u8()?;
-        let _padding = resp.read_ub2()?;
-        let _success_iters = resp.read_ub4()?;
-        if resp.read_ub4()? > 0 {
-            let _logical_rowid = resp.read_bytes_with_length()?;
+        resp.deserialize_status(buf)?;
+        let _current_row_num = buf.read_ub4()?;
+        let _error_num_short = buf.read_ub2()?;
+        let _array_elem_error_1 = buf.read_ub2()?;
+        let _array_elem_error_2 = buf.read_ub2()?;
+        let cursor_id = buf.read_ub2()?;
+        let error_pos = buf.read_ub2()?;
+        let _old_sql_type = buf.read_u8()?;
+        let _fatal = buf.read_u8()?;
+        let _flags_1 = buf.read_u8()?;
+        let _user_cursor_options = buf.read_u8()?;
+        let _upi_parameter = buf.read_u8()?;
+        let flags = buf.read_u8()?;
+        let _rowid = Rowid::deserialize(buf)?;
+        let _os_error = buf.read_ub4()?;
+        let _statement_num = buf.read_u8()?;
+        let _call_num = buf.read_u8()?;
+        let _padding = buf.read_ub2()?;
+        let _success_iters = buf.read_ub4()?;
+        if buf.read_ub4()? > 0 {
+            let _logical_rowid = buf.read_bytes_with_length()?;
         }
-        let batch_errors = Self::deserialize_batch_errors(resp)?;
-        let error_num = resp.read_ub4()?;
-        let rowcount = resp.read_ub8()?;
+        let batch_errors = Self::deserialize_batch_errors(buf)?;
+        let error_num = buf.read_ub4()?;
+        let rowcount = buf.read_ub8()?;
         if client.supports_ttc_field_version(constants::TTC_FIELD_VERSION_20_1)
         {
-            let _sql_type = resp.read_ub4()?;
-            let _server_checksum = resp.read_ub4()?;
+            let _sql_type = buf.read_ub4()?;
+            let _server_checksum = buf.read_ub4()?;
         }
         let db_error = if error_num == 0 {
             None
         } else {
-            let message = resp.read_utf8_with_length()?;
+            let message = buf.read_utf8_with_length()?;
             Some(DbError {
                 code: error_num as usize,
                 offset: error_pos as usize,
@@ -98,53 +100,53 @@ impl ErrorInfo {
     /// array of error codes, one of the rows' offsets in the batch and one of
     /// the messages.
     fn deserialize_batch_errors(
-        resp: &mut Response,
+        buf: &mut ReadBuffer,
     ) -> Result<Vec<DbError>, Error> {
         let mut errors = Vec::new();
-        let num_errors = resp.read_ub2()?;
+        let num_errors = buf.read_ub2()?;
         if num_errors > 0 {
-            let first_byte = resp.read_u8()?;
+            let first_byte = buf.read_u8()?;
             for _ in 0..num_errors {
                 if first_byte == constants::TTC_LONG_LENGTH_INDICATOR {
-                    resp.read_ub4()?; // chunk length
+                    buf.read_ub4()?; // chunk length
                 }
                 errors.push(DbError {
-                    code: resp.read_ub2()?.into(),
+                    code: buf.read_ub2()?.into(),
                     offset: 0,
                     message: String::new(),
                 });
             }
             if first_byte == constants::TTC_LONG_LENGTH_INDICATOR {
-                resp.advance(1)?; // end marker
+                buf.read_bytes(1)?; // end marker
             }
         }
-        let num_offsets = resp.read_ub4()?;
+        let num_offsets = buf.read_ub4()?;
         if num_offsets > 0 {
-            let first_byte = resp.read_u8()?;
+            let first_byte = buf.read_u8()?;
             for i in 0..num_offsets as usize {
                 if first_byte == constants::TTC_LONG_LENGTH_INDICATOR {
-                    resp.read_ub4()?; // chunk length
+                    buf.read_ub4()?; // chunk length
                 }
-                let offset = resp.read_ub4()? as usize;
+                let offset = buf.read_ub4()? as usize;
                 if let Some(error) = errors.get_mut(i) {
                     error.offset = offset;
                 }
             }
             if first_byte == constants::TTC_LONG_LENGTH_INDICATOR {
-                resp.advance(1)?; // end marker
+                buf.read_bytes(1)?; // end marker
             }
         }
-        let num_messages = resp.read_ub2()?;
+        let num_messages = buf.read_ub2()?;
         if num_messages > 0 {
-            resp.advance(1)?; // packed size
+            buf.read_bytes(1)?; // packed size
             for i in 0..num_messages as usize {
-                resp.read_ub2()?; // chunk length
+                buf.read_ub2()?; // chunk length
                 let message =
-                    resp.read_utf8_with_length()?.trim_end().to_string();
+                    buf.read_utf8_with_length()?.trim_end().to_string();
                 if let Some(error) = errors.get_mut(i) {
                     error.message = message;
                 }
-                resp.advance(2)?; // end marker
+                buf.read_bytes(2)?; // end marker
             }
         }
         // The database doesn't list them in the rows' order.

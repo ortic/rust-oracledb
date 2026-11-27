@@ -47,6 +47,8 @@ static TEST_CONFIG: LazyLock<TestConfig> = LazyLock::new(|| {
     let admin_password = get_env_value("RSO_TEST_ADMIN_PASSWORD", "");
     let user = get_env_value("RSO_TEST_MAIN_USER", "rsotest");
     let password = get_env_value("RSO_TEST_MAIN_PASSWORD", "");
+    let proxy_user = get_env_value("RSO_TEST_PROXY_USER", "rsotestproxy");
+    let proxy_password = get_env_value("RSO_TEST_PROXY_PASSWORD", "");
     let connect_string = get_env_value("RSO_TEST_CONNECT_STRING", "");
     // for TLS (tcps://) with a certificate that isn't publicly trusted, and
     // Native Network Encryption
@@ -97,6 +99,8 @@ static TEST_CONFIG: LazyLock<TestConfig> = LazyLock::new(|| {
         admin_password,
         user,
         password,
+        proxy_user,
+        proxy_password,
         connect_string,
         admin_config,
         config,
@@ -109,6 +113,8 @@ pub struct TestConfig {
     pub admin_password: String,
     pub user: String,
     pub password: String,
+    pub proxy_user: String,
+    pub proxy_password: String,
     pub connect_string: String,
     pub admin_config: Config,
     pub config: Config,

@@ -46,7 +46,7 @@ use crate::write_buffer::WriteBuffer;
 
 /// Represents the value of DATE, TIMESTAMP, TIMESTAMP WITH LOCAL TIME ZONE and
 /// TIMESTAMP WITH TIME ZONE columns in the database.
-#[derive(Clone, Copy, Debug, PartialEq)]
+#[derive(Clone, Copy, PartialEq)]
 pub struct OracleTimestamp {
     year: i16,
     month: u8,
@@ -83,6 +83,29 @@ impl Default for OracleTimestamp {
 }
 
 impl OracleTimestamp {
+    /// Adjusts the timestamp to be UTC based on the database time zone offset,
+    /// which is less than a day. Oracle's calendar is Julian before October
+    /// 15, 1582 and has no year 0, so this doesn't go through chrono.
+    pub(crate) fn adjust_timestamp_ltz_to_utc(
+        &mut self,
+        db_timezone_offset: chrono::Duration,
+    ) -> Result<(), Error> {
+        let minutes = db_timezone_offset.num_minutes();
+        if minutes.abs() >= 24 * 60 {
+            return Err(Error::out_of_range(format!(
+                "database time zone offset of {minutes} minutes"
+            )));
+        }
+        *self = Self {
+            has_time_zone: true,
+            tz_hour_offset: 0,
+            tz_minute_offset: 0,
+            tz_region_id: 0,
+            ..self.add_minutes(-(minutes as i32))
+        };
+        Ok(())
+    }
+
     #[cfg(feature = "arrow")]
     /// Returns the timestamp in the specified Arrow time unit.
     pub(crate) fn to_timestamp(
@@ -342,15 +365,17 @@ impl fmt::Display for OracleTimestamp {
     fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
         write!(
             f,
-            "{:04}-{:02}-{:02}T{:02}:{:02}:{:02}.{:09}",
+            "{:04}-{:02}-{:02}T{:02}:{:02}:{:02}",
             self.year,
             self.month,
             self.day,
             self.hour,
             self.minute,
             self.second,
-            self.nanoseconds
         )?;
+        if self.nanoseconds != 0 {
+            write!(f, ".{:09}", self.nanoseconds)?;
+        }
         if !self.has_time_zone {
             return Ok(());
         }
@@ -374,6 +399,12 @@ impl fmt::Display for OracleTimestamp {
             write!(f, "[{region}]")?;
         }
         Ok(())
+    }
+}
+
+impl fmt::Debug for OracleTimestamp {
+    fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
+        f.debug_tuple("OracleTimestamp").field(&self.to_string()).finish()
     }
 }
 

@@ -32,7 +32,10 @@ use crate::bind_params::BindParameters;
 use crate::client::Client;
 use crate::constants;
 use crate::error::Error;
+use crate::messages::DataTypesMessage;
 use crate::messages::Message;
+use crate::messages::ProtocolMessage;
+use crate::read_buffer::ReadBuffer;
 use crate::response::Response;
 use crate::rowid::Rowid;
 use crate::statement::CachedStatement;
@@ -43,6 +46,7 @@ pub struct ExecuteMessage<'statement, 'params> {
     parse_only: bool,
     batch_errors: bool,
     array_dml_row_counts: bool,
+    data_types_message: Option<DataTypesMessage>,
     num_execs: u32,
     num_fetch_columns: u32,
     autocommit: bool,
@@ -294,6 +298,7 @@ impl ExecuteMessage<'_, '_> {
             scroll_operation: false,
             batch_errors: statement.options().batch_errors(),
             array_dml_row_counts: false,
+            data_types_message: None,
             num_execs: params.num_rows().try_into().unwrap(),
             num_fetch_columns: 0,
             autocommit: false,
@@ -310,9 +315,10 @@ impl Message for ExecuteMessage<'_, '_> {
         &mut self,
         client: &Client,
         resp: &mut Response,
+        buf: &mut ReadBuffer,
     ) -> Result<(), Error> {
-        resp.read_bytes_with_length()?;
-        self.statement.populate_from_describe_info(client, resp)?;
+        buf.read_bytes_with_length()?;
+        self.statement.populate_from_describe_info(client, resp, buf)?;
         let num_metadata = self.statement.out_metadata().len();
         self.num_fetch_columns = num_metadata.try_into().unwrap();
         Ok(())
@@ -322,38 +328,53 @@ impl Message for ExecuteMessage<'_, '_> {
         &mut self,
         _client: &Client,
         resp: &mut Response,
+        buf: &mut ReadBuffer,
     ) -> Result<(), Error> {
-        let _flags = resp.read_u8()?;
-        let _num_requests = resp.read_ub2()? as u32;
-        let _num_iters = resp.read_ub4()?;
+        let _flags = buf.read_u8()?;
+        let _num_requests = buf.read_ub2()? as u32;
+        let _num_iters = buf.read_ub4()?;
         let _num_binds = _num_iters * 256 + _num_requests;
-        let _num_iters_this_time = resp.read_ub4()?;
-        let _uac_buffer_length = resp.read_ub2()?;
-        resp.read_bit_vector()?;
+        let _num_iters_this_time = buf.read_ub4()?;
+        let _uac_buffer_length = buf.read_ub2()?;
+        resp.read_bit_vector(buf)?;
         let _rowid: Option<Rowid> = {
-            let num_bytes = resp.read_ub2()?;
-            if num_bytes == 0 { None } else { Some(Rowid::deserialize(resp)?) }
+            let num_bytes = buf.read_ub2()?;
+            if num_bytes == 0 { None } else { Some(Rowid::deserialize(buf)?) }
         };
-        self.statement.set_bind_directions(resp)
+        self.statement.set_bind_directions(buf)
+    }
+
+    /// Deserialize the renegotiation that takes place when an ALTER SESSION
+    /// SET CONTAINER statement is executed and the new PDB has different
+    /// characteristics requiring renegotiation.
+    fn deserialize_renegotiate(
+        &mut self,
+        client: &Client,
+        resp: &mut Response,
+        buf: &mut ReadBuffer,
+    ) -> Result<(), Error> {
+        self.data_types_message = Some(DataTypesMessage::new());
+        ProtocolMessage::new().deserialize(client, resp, buf)
     }
 
     fn deserialize_return_parameters(
         &mut self,
         _client: &Client,
         resp: &mut Response,
+        buf: &mut ReadBuffer,
     ) -> Result<(), Error> {
-        for _ in 0..resp.read_ub2()? {
-            resp.read_ub4()?; // al804l
+        for _ in 0..buf.read_ub2()? {
+            buf.read_ub4()?; // al804l
         }
-        let mut num_bytes = resp.read_ub2()?;
+        let mut num_bytes = buf.read_ub2()?;
         if num_bytes > 0 {
-            resp.advance(num_bytes.into())?; // al8txl
+            let _al8txl = buf.read_bytes(num_bytes.into())?;
         }
-        let num_pairs = resp.read_ub2()?;
-        resp.process_keyword_value_pairs(num_pairs)?;
-        num_bytes = resp.read_ub2()?;
+        let num_pairs = buf.read_ub2()?;
+        resp.process_keyword_value_pairs(buf, num_pairs)?;
+        num_bytes = buf.read_ub2()?;
         if num_bytes > 0 {
-            resp.advance(num_bytes.into())?; // registration
+            let _registration = buf.read_bytes(num_bytes.into())?;
         }
         if self.array_dml_row_counts {
             todo!();
@@ -366,12 +387,39 @@ impl Message for ExecuteMessage<'_, '_> {
         &mut self,
         client: &Client,
         resp: &mut Response,
+        buf: &mut ReadBuffer,
     ) -> Result<(), Error> {
         resp.deserialize_row_data(
+            buf,
             client,
             self.statement,
             self.statement.is_query(),
         )
+    }
+
+    /// Deserializes one TTC message.
+    fn deserialize_ttc_message(
+        &mut self,
+        client: &Client,
+        resp: &mut Response,
+        buf: &mut ReadBuffer,
+        message_type: u8,
+    ) -> Result<(), Error> {
+        if let Some(mut data_types_message) = self.data_types_message.take() {
+            data_types_message.deserialize_ttc_message(
+                client,
+                resp,
+                buf,
+                message_type,
+            )
+        } else {
+            self.deserialize_ttc_message_common(
+                client,
+                resp,
+                buf,
+                message_type,
+            )
+        }
     }
 
     fn post_deserialize(
@@ -384,12 +432,23 @@ impl Message for ExecuteMessage<'_, '_> {
         resp.check_for_statement_error(client, self.statement)
     }
 
+    /// Runs before deserialization takes place. Ensures that the size of the
+    /// bit vector used for repeated values is correct, even when no describe
+    /// info is returned (which is true for statements that have already been
+    /// parsed before).
+    fn pre_deserialize(&mut self, _client: &mut Client, resp: &mut Response) {
+        resp.set_num_columns(self.statement.out_metadata().len());
+    }
+
     fn resend_needed(&self) -> bool {
-        self.statement.requires_define()
+        self.data_types_message.is_some() || self.statement.requires_define()
     }
 
     fn serialize(&self, client: &Client, buf: &mut WriteBuffer) {
-        if !self.statement.has_cursor()
+        if let Some(ref data_types_message) = self.data_types_message {
+            data_types_message.serialize(client, buf);
+        } else if !self.statement.has_cursor()
+            || self.statement.sql().is_empty()
             || self.statement.no_prefetch()
             || self.statement.binds_changed()
             || self.parse_only

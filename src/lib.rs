@@ -32,6 +32,11 @@
 #![crate_name = "oracledb"]
 #![forbid(unsafe_code)]
 
+// deliberately restrict compilation to 64-bit architectures so that usize and
+// u64 can be freely interchanged without the need for conversion
+#[cfg(not(target_pointer_width = "64"))]
+compile_error!("This crate only supports 64-bit architectures.");
+
 #[cfg(feature = "arrow")]
 mod arrow;
 mod bind_params;
@@ -71,6 +76,8 @@ mod vector;
 mod write_buffer;
 
 // public structs
+#[cfg(feature = "arrow")]
+pub use crate::arrow::ArrowBatchReader;
 pub use crate::config::Config;
 pub use crate::config::PoolConfig;
 pub use crate::connection::Connection;

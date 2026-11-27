@@ -92,11 +92,11 @@ fn test_3301(
     value: &str,
 ) -> Result<(), oracledb::Error> {
     let config = oracledb::Config::default();
-    let err = match method(config, value.to_string()) {
-        Ok(_) => panic!("expected failure"),
-        Err(err) => err,
-    };
-    assert!(matches!(err.kind(), oracledb::ErrorKind::InvalidNetworkName(_)));
+    let error = method(config, value.to_string()).unwrap_err();
+    assert!(matches!(
+        error.kind(),
+        oracledb::ErrorKind::InvalidNetworkName(_)
+    ));
     Ok(())
 }
 
@@ -218,13 +218,10 @@ fn test_3302(
 #[case("(DESCRIPTION_LIST=(ADRESS_LIST=(KEY=VALUE)))")]
 /// Tests parsing invalid connect strings.
 fn test_3303(#[case] value: &str) -> Result<(), oracledb::Error> {
-    let err = match oracledb::Config::default().set_connect_string(value) {
-        Ok(_) => panic!("expected failure"),
-        Err(err) => err,
-    };
-    println!("error kind is {:?}", err.kind());
+    let error =
+        oracledb::Config::default().set_connect_string(value).unwrap_err();
     assert!(matches!(
-        err.kind(),
+        error.kind(),
         oracledb::ErrorKind::InvalidConnectString(_, _)
             | oracledb::ErrorKind::ParseError(_, _)
     ));
@@ -260,33 +257,50 @@ fn test_3304() {
     ));
 }
 
+#[rstest]
+#[case::valid_proxy_user("user[proxy_user]", Some("user"), Some("proxy_user"))]
+#[case::external_auth("[proxy_user]", None, Some("proxy_user"))]
+#[case::no_opening_bracket("userproxy_user]", Some("userproxy_user]"), None)]
+#[case::no_closing_bracket("user[proxy_user", Some("user[proxy_user"), None)]
+#[case::invalid_proxy_user("user[]", Some("user[]"), None)]
+/// Verifies parsing of proxy user from an encoded string.
+fn test_3305(
+    #[case] value: &str,
+    #[case] user: Option<&str>,
+    #[case] proxy_user: Option<&str>,
+) {
+    let config = oracledb::Config::default().set_user(value);
+    assert_eq!(config.user(), user);
+    assert_eq!(config.proxy_user(), proxy_user);
+}
+
 #[test]
 /// Verifies that the parameters of an easy connect string apply as in a full
 /// descriptor (MY_WALLET_DIRECTORY being the descriptor's name for
 /// wallet_location), and that malformed ones are an error.
-fn test_3305() -> Result<(), oracledb::Error> {
+fn test_3306() -> Result<(), oracledb::Error> {
     let easy = oracledb::Config::default().set_connect_string(
-        "tcps://host_3305:2484/service_3305?wallet_location=/wallet_3305\
+        "tcps://host_3306:2484/service_3306?wallet_location=/wallet_3306\
          &SSL_SERVER_DN_MATCH=off&retry_count=3&pool_boundary=statement",
     )?;
     let full = oracledb::Config::default().set_connect_string(
         "(DESCRIPTION=(RETRY_COUNT=3)\
-         (ADDRESS=(PROTOCOL=tcps)(HOST=host_3305)(PORT=2484))\
-         (CONNECT_DATA=(SERVICE_NAME=service_3305)(POOL_BOUNDARY=statement))\
+         (ADDRESS=(PROTOCOL=tcps)(HOST=host_3306)(PORT=2484))\
+         (CONNECT_DATA=(SERVICE_NAME=service_3306)(POOL_BOUNDARY=statement))\
          (SECURITY=(SSL_SERVER_DN_MATCH=off)\
-         (MY_WALLET_DIRECTORY=/wallet_3305)))",
+         (MY_WALLET_DIRECTORY=/wallet_3306)))",
     )?;
     assert_eq!(easy.get_connect_descriptor(), full.get_connect_descriptor());
     assert!(
         easy.get_connect_descriptor()
-            .contains("(SECURITY=(MY_WALLET_DIRECTORY=/wallet_3305))"),
+            .contains("(SECURITY=(MY_WALLET_DIRECTORY=/wallet_3306))"),
         "{}",
         easy.get_connect_descriptor()
     );
     for value in [
-        "host_3305/service_3305?retry_count",
-        "host_3305/service_3305?retry_count=x",
-        "host_3305/service_3305?=3",
+        "host_3306/service_3306?retry_count",
+        "host_3306/service_3306?retry_count=x",
+        "host_3306/service_3306?=3",
     ] {
         let Err(error) = oracledb::Config::default().set_connect_string(value)
         else {

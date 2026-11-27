@@ -35,6 +35,7 @@ use crate::response::{DbError, Response};
 use crate::row::{DbRow, Row};
 use crate::statement::CachedStatement;
 
+#[derive(Debug)]
 /// Represents the result returned by the database when calling
 /// [Connection::execute()](`crate::Connection::execute()`),
 /// [Connection::execute_named()](`crate::Connection::execute_named()`).
@@ -66,11 +67,12 @@ impl ExecResult {
             column_info: Arc::new(statement.out_metadata().to_vec()),
             out_bind_data,
             returned_data,
-            rows_affected: resp.get_rowcount(),
+            rows_affected: resp.get_rowcount(statement),
         }
     }
 
     /// Returns the number of rows affected by the execution of the statement.
+    /// For PL/SQL statements, this value is always zero.
     pub fn rows_affected(&self) -> u64 {
         self.rows_affected
     }
@@ -96,6 +98,7 @@ impl ExecResult {
     }
 }
 
+#[derive(Debug)]
 /// Represents the result returned by the database when calling
 /// [Connection::execute_batch()](`crate::Connection::execute_batch()`).
 pub struct ExecBatchResult {
@@ -131,7 +134,7 @@ impl ExecBatchResult {
             out_bind_data,
             returned_data,
             num_execs,
-            rows_affected: resp.get_rowcount(),
+            rows_affected: resp.get_rowcount(statement),
             batch_errors: resp.take_batch_errors(),
         }
     }
@@ -144,6 +147,7 @@ impl ExecBatchResult {
     }
 
     /// Returns the number of rows affected by the execution of the statement.
+    /// For PL/SQL statements, this value is always zero.
     pub fn rows_affected(&self) -> u64 {
         self.rows_affected
     }

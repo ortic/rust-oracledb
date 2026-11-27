@@ -29,6 +29,8 @@
 // publicly.
 //-----------------------------------------------------------------------------
 
+use std::fmt;
+
 use super::CachedStatement;
 
 #[cfg(feature = "arrow")]
@@ -110,6 +112,11 @@ impl Statement {
         Self { client_ref, statement, return_on_drop: true }
     }
 
+    #[cfg(feature = "arrow")]
+    pub(crate) fn options(&self) -> &super::StatementOptions {
+        self.statement.options()
+    }
+
     /// Returns the bind names used by the statement.
     pub fn bind_names(&self) -> &[String] {
         self.statement.bind_names()
@@ -117,8 +124,13 @@ impl Statement {
 
     /// Ensures that the statement is fully parsed by the database. If the
     /// statement has not been fully parsed by the database, a round trip will
-    /// be performed to ask the database to parse the statement. Note that DDL
-    /// statements will also result in execution.
+    /// be performed to ask the database to parse the statement. If a round
+    /// trip is desired regardless of whether the statement has been parsed
+    /// before, use
+    /// [exclude_from_cache()](crate::StatementBuilder::exclude_from_cache())
+    /// when building the statement.
+    ///
+    /// Note that DDL statements will also result in execution.
     pub fn ensure_fully_parsed(&mut self) -> Result<(), Error> {
         if !self.is_fully_parsed() {
             self.get_execute_response(BindParameters::default(), true)?;
@@ -143,10 +155,11 @@ impl Statement {
 
     /// Executes a SQL statement against the database multiple times in one
     /// round trip.
-    pub fn execute_batch(
+    pub fn execute_batch<'params>(
         &mut self,
-        params: BindParameters,
+        params: impl Into<BindParameters<'params>>,
     ) -> Result<ExecBatchResult, Error> {
+        let params = params.into();
         self.statement.check_binds(&params)?;
         let num_execs = params.num_rows();
         let mut response = self.get_execute_response(params, false)?;
@@ -228,18 +241,26 @@ impl Statement {
     #[cfg(feature = "arrow")]
     /// Performs a query against the database and returns an Arrow RecordBatch
     /// structure containing the data.
-    pub fn query_arrow(
-        mut self,
-        params: BindParameters,
+    pub fn query_arrow<'params>(
+        self,
+        params: impl Into<BindParameters<'params>>,
     ) -> Result<arrow_array::RecordBatch, Error> {
+        self.query_arrow_batches(params)?.into_single_batch()
+    }
+
+    #[cfg(feature = "arrow")]
+    /// Executes a query and returns Arrow's standard record batch reader.
+    ///
+    /// The reader exposes a schema and yields results one batch at a time,
+    /// allowing callers to process results incrementally. Each set of
+    /// bind parameters is executed in order. See [crate::ArrowBatchReader].
+    pub fn query_arrow_batches<'params>(
+        mut self,
+        params: impl Into<BindParameters<'params>>,
+    ) -> Result<arrow::ArrowBatchReader<'params>, Error> {
+        let params = params.into();
         self.statement.check_binds(&params)?;
-        let mut client = self.client_ref.lock()?;
-        arrow::query_single_batch(
-            &mut client,
-            &mut self.statement,
-            &self.client_ref,
-            params,
-        )
+        arrow::ArrowBatchReader::new(self, params)
     }
 
     /// Executes the statement with the given parameters and returns a Cursor
@@ -296,5 +317,15 @@ impl Drop for Statement {
             let mut client = self.client_ref.lock().unwrap();
             client.return_statement(&self.statement);
         }
+    }
+}
+
+impl fmt::Debug for Statement {
+    fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
+        f.debug_struct("Statement")
+            .field("sql", &self.sql())
+            .field("cursor_id", &self.statement.cursor_id())
+            .field("bind_names", &self.bind_names())
+            .finish()
     }
 }

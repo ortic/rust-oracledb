@@ -205,7 +205,7 @@ pub const TTC_MSG_TYPE_BIT_VECTOR: u8 = 21;
 pub const TTC_MSG_TYPE_SERVER_SIDE_PIGGYBACK: u8 = 23;
 pub const _TTC_MSG_TYPE_ONEWAY_FN: u8 = 26;
 pub const _TTC_MSG_TYPE_IMPLICIT_RESULTSET: u8 = 27;
-pub const _TTC_MSG_TYPE_RENEGOTIATE: u8 = 28;
+pub const TTC_MSG_TYPE_RENEGOTIATE: u8 = 28;
 pub const TTC_MSG_TYPE_END_OF_RESPONSE: u8 = 29;
 pub const _TTC_MSG_TYPE_TOKEN: u8 = 33;
 pub const TTC_MSG_TYPE_FAST_AUTH: u8 = 34;
@@ -354,9 +354,9 @@ pub const CHARSET_ID_UTF8: u16 = 873;
 pub const CHARSET_ID_UTF16: u16 = 2000;
 
 // verifier types
-pub const _VERIFIER_TYPE_11G_1: u16 = 0xb152;
-pub const _VERIFIER_TYPE_11G_2: u16 = 0x1b25;
-pub const _VERIFIER_TYPE_12C: u16 = 0x4815;
+pub const VERIFIER_TYPE_11G_1: u32 = 0xb152;
+pub const VERIFIER_TYPE_11G_2: u32 = 0x1b25;
+pub const VERIFIER_TYPE_12C: u32 = 0x4815;
 
 // data flags
 pub const TTC_DATA_FLAGS_EOF: u16 = 0x0040;

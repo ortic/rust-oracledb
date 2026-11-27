@@ -35,7 +35,11 @@ use crate::client::Client;
 use crate::constants;
 use crate::error::Error;
 use crate::messages::Message;
+use crate::ora_type::OracleIntervalDS;
+use crate::read_buffer::FromBuf;
+use crate::read_buffer::ReadBuffer;
 use crate::response::Response;
+use crate::write_buffer::ToBuf;
 use crate::write_buffer::WriteBuffer;
 
 // simple tuple structure defining a data type and its representation
@@ -825,11 +829,13 @@ const DATA_TYPES: [DataType; 322] = [
     DataType(DATA_TYPE_EUSC, DATA_TYPE_EUSC, TYPE_REP_UNIVERSAL),
 ];
 
-pub struct DataTypesMessage {}
+pub(crate) struct DataTypesMessage {
+    db_timezone_offset: OracleIntervalDS,
+}
 
 impl DataTypesMessage {
-    pub fn new() -> DataTypesMessage {
-        DataTypesMessage {}
+    pub fn new() -> Self {
+        Self { db_timezone_offset: OracleIntervalDS::default() }
     }
 }
 
@@ -838,19 +844,23 @@ impl Message for DataTypesMessage {
         &mut self,
         _client: &Client,
         resp: &mut Response,
+        buf: &mut ReadBuffer,
         ttc_message_type: u8,
     ) -> Result<(), Error> {
         if ttc_message_type != constants::TTC_MSG_TYPE_DATA_TYPES {
-            return Err(resp.unknown_ttc_message_type(ttc_message_type));
+            return Err(resp.unknown_ttc_message_type(buf, ttc_message_type));
         }
+        self.db_timezone_offset = OracleIntervalDS::from_buf(
+            buf.read_bytes(constants::ORA_TYPE_SIZE_INTERVAL_DS)?,
+        );
         loop {
-            let data_type = resp.read_u16be()?;
+            let data_type = buf.read_u16be()?;
             if data_type == 0 {
                 break;
             }
-            let conv_data_type = resp.read_u16be()?;
+            let conv_data_type = buf.read_u16be()?;
             if conv_data_type != 0 {
-                resp.advance(4)?;
+                buf.read_bytes(4)?;
             }
         }
         Ok(())
@@ -864,6 +874,16 @@ impl Message for DataTypesMessage {
         true
     }
 
+    /// Called after the data sent by the database has been deserialized.
+    fn post_deserialize(
+        &mut self,
+        client: &mut Client,
+        _resp: &mut Response,
+    ) -> Result<(), Error> {
+        client.set_db_timezone_offset(self.db_timezone_offset);
+        Ok(())
+    }
+
     fn serialize(&self, client: &Client, buf: &mut WriteBuffer) {
         buf.write_u8(constants::TTC_MSG_TYPE_DATA_TYPES);
         buf.write_u16le(constants::CHARSET_ID_UTF8);
@@ -871,6 +891,8 @@ impl Message for DataTypesMessage {
         buf.write_u8(ENCODING_MULTI_BYTE | ENCODING_CONV_LENGTH);
         buf.write_bytes_with_length(client.get_compile_caps());
         buf.write_bytes_with_length(client.get_runtime_caps());
+        let utc = OracleIntervalDS::default();
+        utc.to_buf(buf, crate::DB_TYPE_INTERVAL_DS, false);
         for entry in DATA_TYPES.iter() {
             buf.write_u16be(entry.0);
             buf.write_u16be(entry.1);

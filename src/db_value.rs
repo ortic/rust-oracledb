@@ -28,6 +28,8 @@
 // Defines the structures and enumeration containing database values.
 //-----------------------------------------------------------------------------
 
+use std::fmt;
+
 use crate::client::Client;
 use crate::client::ClientRef;
 use crate::constants;
@@ -43,6 +45,7 @@ use crate::ora_type::OracleIntervalDS;
 use crate::ora_type::OracleIntervalYM;
 use crate::ora_type::OracleNumber;
 use crate::ora_type::OracleTimestamp;
+use crate::read_buffer::ReadBuffer;
 use crate::response::Response;
 use crate::row::ColumnData;
 use crate::row::DbRow;
@@ -126,15 +129,16 @@ impl PendingDbValue {
 impl DbValue {
     fn array_from_response(
         resp: &mut Response,
+        buf: &mut ReadBuffer,
         client: &Client,
         statement: &CachedStatement,
         db_type: &'static DbType,
     ) -> Result<Option<DbValue>, Error> {
-        let num_elements = resp.read_ub4()? as usize;
+        let num_elements = buf.read_ub4()? as usize;
         let mut array: Vec<Option<DbValue>> = Vec::with_capacity(num_elements);
         for _ in 0..num_elements {
             array.push(DbValue::scalar_from_response(
-                resp, client, statement, db_type, false,
+                resp, buf, client, statement, db_type, false,
             )?);
         }
         Ok(Some(DbValue::Array(DbRow::new(array))))
@@ -142,6 +146,7 @@ impl DbValue {
 
     fn scalar_from_response(
         resp: &mut Response,
+        buf: &mut ReadBuffer,
         client: &Client,
         statement: &CachedStatement,
         db_type: &'static DbType,
@@ -149,83 +154,93 @@ impl DbValue {
     ) -> Result<Option<DbValue>, Error> {
         let mut value = match db_type.ora_type_num {
             constants::ORA_TYPE_NUM_BINARY_DOUBLE => {
-                Ok(resp.read_value::<f64>()?.map(DbValue::BinaryDouble))
+                Ok(buf.read_value::<f64>()?.map(DbValue::BinaryDouble))
             }
             constants::ORA_TYPE_NUM_VECTOR => {
-                Ok(resp.read_value_lob::<Vector>()?.map(DbValue::Vector))
+                Ok(buf.read_value_lob::<Vector>()?.map(DbValue::Vector))
             }
             constants::ORA_TYPE_NUM_BINARY_FLOAT => {
-                Ok(resp.read_value::<f32>()?.map(DbValue::BinaryFloat))
+                Ok(buf.read_value::<f32>()?.map(DbValue::BinaryFloat))
             }
             constants::ORA_TYPE_NUM_BOOLEAN => {
-                Ok(resp.read_value::<bool>()?.map(DbValue::Boolean))
+                Ok(buf.read_value::<bool>()?.map(DbValue::Boolean))
             }
             constants::ORA_TYPE_NUM_DATE
             | constants::ORA_TYPE_NUM_TIMESTAMP
-            | constants::ORA_TYPE_NUM_TIMESTAMP_LTZ
-            | constants::ORA_TYPE_NUM_TIMESTAMP_TZ => Ok(resp
+            | constants::ORA_TYPE_NUM_TIMESTAMP_TZ => Ok(buf
                 .read_value::<OracleTimestamp>()?
                 .map(DbValue::Timestamp)),
-            constants::ORA_TYPE_NUM_INTERVAL_DS => Ok(resp
+            constants::ORA_TYPE_NUM_TIMESTAMP_LTZ => {
+                if let Some(mut value) = buf.read_value::<OracleTimestamp>()? {
+                    // With a named database time zone the value stays in it,
+                    // as before, rather than every fetch of it failing.
+                    if let Ok(offset) = client.db_timezone_offset() {
+                        value.adjust_timestamp_ltz_to_utc(offset)?;
+                    }
+                    Ok(Some(DbValue::Timestamp(value)))
+                } else {
+                    Ok(None)
+                }
+            }
+            constants::ORA_TYPE_NUM_INTERVAL_DS => Ok(buf
                 .read_value::<OracleIntervalDS>()?
                 .map(DbValue::IntervalDS)),
-            constants::ORA_TYPE_NUM_INTERVAL_YM => Ok(resp
+            constants::ORA_TYPE_NUM_INTERVAL_YM => Ok(buf
                 .read_value::<OracleIntervalYM>()?
                 .map(DbValue::IntervalYM)),
             constants::ORA_TYPE_NUM_BINARY_INTEGER
             | constants::ORA_TYPE_NUM_NUMBER => {
-                Ok(resp.read_value::<OracleNumber>()?.map(DbValue::Number))
+                Ok(buf.read_value::<OracleNumber>()?.map(DbValue::Number))
             }
             constants::ORA_TYPE_NUM_CHAR
             | constants::ORA_TYPE_NUM_LONG
             | constants::ORA_TYPE_NUM_VARCHAR => {
-                let bytes = resp.read_bytes_with_length()?;
+                let bytes = buf.read_bytes_with_length()?;
                 if bytes.is_empty() {
                     Ok(None)
                 } else if db_type.csfrm == constants::CS_FORM_NCHAR {
                     let value = utils::utf16be_bytes_to_string(&bytes)?;
                     Ok(Some(DbValue::String(value)))
                 } else {
-                    let value = std::str::from_utf8(&bytes)?;
-                    Ok(Some(DbValue::String(value.to_string())))
+                    let value = String::from_utf8(bytes.into_owned())?;
+                    Ok(Some(DbValue::String(value)))
                 }
             }
             constants::ORA_TYPE_NUM_RAW | constants::ORA_TYPE_NUM_LONG_RAW => {
-                let bytes = resp.read_bytes_with_length()?;
+                let bytes = buf.read_bytes_with_length()?;
                 if bytes.is_empty() {
                     Ok(None)
                 } else {
-                    Ok(Some(DbValue::Bytes(bytes.to_vec())))
+                    Ok(Some(DbValue::Bytes(bytes.into_owned())))
                 }
             }
-            constants::ORA_TYPE_NUM_ROWID => {
-                match resp.read_short_length()? {
-                    0 => Ok(None),
-                    _ => Ok(Some(DbValue::Rowid(Rowid::deserialize(resp)?))),
-                }
-            }
+            constants::ORA_TYPE_NUM_ROWID => match buf.read_short_length()? {
+                0 => Ok(None),
+                _ => Ok(Some(DbValue::Rowid(Rowid::deserialize(buf)?))),
+            },
             constants::ORA_TYPE_NUM_UROWID => {
                 if in_fetch {
-                    Ok(resp.deserialize_urowid()?.map(DbValue::String))
+                    Ok(resp.deserialize_urowid(buf)?.map(DbValue::String))
                 } else {
                     Ok(Some(DbValue::String(
-                        resp.read_utf8_with_length()?.into(),
+                        buf.read_utf8_with_length()?.into(),
                     )))
                 }
             }
             constants::ORA_TYPE_NUM_JSON => {
-                Ok(resp.read_value_lob::<JsonValue>()?.map(DbValue::Json))
+                Ok(buf.read_value_lob::<JsonValue>()?.map(DbValue::Json))
             }
             constants::ORA_TYPE_NUM_CLOB
             | constants::ORA_TYPE_NUM_BLOB
             | constants::ORA_TYPE_NUM_BFILE => {
-                let data = PendingLobData::from_resp(resp, db_type)?;
+                let data = PendingLobData::from_buf(buf, db_type)?;
                 resp.add_pending_db_value(data.map(PendingDbValue::Lob));
                 Ok(None)
             }
             constants::ORA_TYPE_NUM_CURSOR => {
                 let statement = CachedStatement::from_cursor_response(
                     resp,
+                    buf,
                     client,
                     in_fetch,
                     statement.options(),
@@ -236,7 +251,7 @@ impl DbValue {
                 Ok(None)
             }
             constants::ORA_TYPE_NUM_OBJECT => {
-                let object = PendingDbObject::from_response(resp)?;
+                let object = PendingDbObject::from_buf(buf)?;
                 resp.add_pending_db_value(
                     object.map(PendingDbValue::DbObject),
                 );
@@ -245,7 +260,7 @@ impl DbValue {
             _ => Err(Error::unsupported_db_type(db_type)),
         }?;
         if !in_fetch {
-            let max_num_bytes = resp.read_sb4()? as isize;
+            let max_num_bytes = buf.read_sb4()? as isize;
             if max_num_bytes < 0
                 && db_type.ora_type_num == constants::ORA_TYPE_NUM_BOOLEAN
             {
@@ -266,8 +281,8 @@ impl DbValue {
         } else if db_type.ora_type_num == constants::ORA_TYPE_NUM_LONG
             || db_type.ora_type_num == constants::ORA_TYPE_NUM_LONG_RAW
         {
-            let _null_indicator = resp.read_sb4()?;
-            let _return_code = resp.read_ub4()?;
+            let _null_indicator = buf.read_sb4()?;
+            let _return_code = buf.read_ub4()?;
         }
         Ok(value)
     }
@@ -275,6 +290,7 @@ impl DbValue {
     /// Creates a database value from the response.
     pub(crate) fn from_response(
         resp: &mut Response,
+        buf: &mut ReadBuffer,
         client: &Client,
         statement: &CachedStatement,
         metadata: &Metadata,
@@ -290,6 +306,7 @@ impl DbValue {
         if metadata.is_array() {
             DbValue::array_from_response(
                 resp,
+                buf,
                 client,
                 statement,
                 metadata.db_type(),
@@ -297,6 +314,7 @@ impl DbValue {
         } else {
             DbValue::scalar_from_response(
                 resp,
+                buf,
                 client,
                 statement,
                 metadata.db_type(),
@@ -308,23 +326,61 @@ impl DbValue {
     /// Returns the type of the stored value.
     pub(crate) fn type_name(&self) -> &str {
         match self {
-            DbValue::Array(_) => "array",
-            DbValue::BinaryDouble(_) => "binary_double",
-            DbValue::BinaryFloat(_) => "binary_float",
-            DbValue::Boolean(_) => "boolean",
-            DbValue::Bytes(_) => "raw",
-            DbValue::Cursor(_) => "cursor",
-            DbValue::DbCollection(_) => "database collection",
-            DbValue::DbObject(_) => "database object",
-            DbValue::IntervalDS(_) => "interval day to second",
-            DbValue::IntervalYM(_) => "interval year to month",
-            DbValue::Json(_) => "json",
-            DbValue::Number(_) => "number",
-            DbValue::Rowid(_) => "rowid",
-            DbValue::String(_) => "string",
-            DbValue::Timestamp(_) => "timestamp",
-            DbValue::Vector(_) => "vector",
-            DbValue::Lob(_) => "lob",
+            Self::Array(_) => "array",
+            Self::BinaryDouble(_) => "binary_double",
+            Self::BinaryFloat(_) => "binary_float",
+            Self::Boolean(_) => "boolean",
+            Self::Bytes(_) => "raw",
+            Self::Cursor(_) => "cursor",
+            Self::DbCollection(_) => "database collection",
+            Self::DbObject(_) => "database object",
+            Self::IntervalDS(_) => "interval day to second",
+            Self::IntervalYM(_) => "interval year to month",
+            Self::Json(_) => "json",
+            Self::Number(_) => "number",
+            Self::Rowid(_) => "rowid",
+            Self::String(_) => "string",
+            Self::Timestamp(_) => "timestamp",
+            Self::Vector(_) => "vector",
+            Self::Lob(_) => "lob",
+        }
+    }
+}
+
+impl fmt::Debug for DbValue {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::Array(v) => f.debug_tuple("Array").field(v).finish(),
+            Self::BinaryDouble(v) => {
+                f.debug_tuple("BinaryDouble").field(v).finish()
+            }
+            Self::BinaryFloat(v) => {
+                f.debug_tuple("BinaryFloat").field(v).finish()
+            }
+            Self::Boolean(v) => f.debug_tuple("Boolean").field(v).finish(),
+            Self::Bytes(v) => crate::utils::bytes_debug_fmt(f, "Bytes", v),
+            Self::Cursor(v) => write!(f, "{:#?}", v),
+            Self::DbCollection(v) => {
+                f.debug_tuple("DbCollection").field(v).finish()
+            }
+            Self::DbObject(v) => f.debug_tuple("DbObject").field(v).finish(),
+            Self::IntervalDS(v) => {
+                f.debug_tuple("IntervalDS").field(&v.to_string()).finish()
+            }
+            Self::IntervalYM(v) => {
+                f.debug_tuple("IntervalYM").field(&v.to_string()).finish()
+            }
+            Self::Json(v) => f.debug_tuple("Json").field(v).finish(),
+            Self::Number(v) => f.debug_tuple("Number").field(v).finish(),
+            Self::Rowid(v) => {
+                f.debug_tuple("Rowid").field(&v.to_string()).finish()
+            }
+            Self::String(v) => crate::utils::string_debug_fmt(f, "String", v),
+            Self::Timestamp(v) => {
+                f.debug_tuple("Timestamp").field(&v.to_string()).finish()
+            }
+            Self::Vector(_) => write!(f, "vector"),
+            Self::Lob(_) => write!(f, "lob"),
         }
     }
 }
@@ -566,7 +622,7 @@ where
 
 /// Trait which transforms values used by applications into the format required
 /// by the database.
-pub trait ToDbValue: ToBuf {
+pub trait ToDbValue: ToBuf + Send + Sync {
     fn db_type(&self) -> &'static DbType;
     fn max_size(&self) -> usize {
         0
@@ -715,7 +771,11 @@ impl ToDbValue for OracleNumber {
 
 impl ToDbValue for OracleTimestamp {
     fn db_type(&self) -> &'static DbType {
-        crate::DB_TYPE_TIMESTAMP
+        if self.is_utc() {
+            crate::DB_TYPE_TIMESTAMP_TZ
+        } else {
+            crate::DB_TYPE_TIMESTAMP
+        }
     }
 }
 
