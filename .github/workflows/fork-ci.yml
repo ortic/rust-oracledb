@@ -46,6 +46,7 @@ jobs:
     env:
       RSO_TEST_MAIN_USER: rsotest
       RSO_TEST_MAIN_PASSWORD: Rsotest_1
+      RSO_TEST_PROXY_PASSWORD: Rsotestproxy_1
       RSO_TEST_CONNECT_STRING: localhost:1521/FREEPDB1
       RSO_TEST_ADMIN_USER: system
       RSO_TEST_ADMIN_PASSWORD: oracle
